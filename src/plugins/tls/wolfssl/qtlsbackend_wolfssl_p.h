@@ -22,8 +22,11 @@
 
 #include <QtNetwork/private/qtlsbackend_p.h>
 
+#include <QtNetwork/qsslcipher.h>
+
 #include <QtCore/qglobal.h>
 #include <QtCore/qloggingcategory.h>
+#include <QtCore/qstring.h>
 
 QT_BEGIN_NAMESPACE
 
@@ -37,19 +40,28 @@ public:
     QTlsBackendWolfSSL();
     ~QTlsBackendWolfSSL() override;
 
+    /* Human-readable text for a wolfSSL or wolfCrypt error code. */
+    static QString errorString(int errorCode);
+    /* A QSslCipher for one of wolfSSL's own suite names, such as
+     * "ECDHE-RSA-AES128-GCM-SHA256" or "TLS13-AES128-GCM-SHA256". */
+    static QSslCipher ciphersuiteFromName(QLatin1StringView name);
+
 private:
     bool isValid() const override;
     long tlsLibraryVersionNumber() const override;
     QString tlsLibraryVersionString() const override;
     long tlsLibraryBuildVersionNumber() const override;
     QString tlsLibraryBuildVersionString() const override;
+    void ensureInitialized() const override;
 
     QString backendName() const override;
     QList<QSsl::SslProtocol> supportedProtocols() const override;
     QList<QSsl::SupportedFeature> supportedFeatures() const override;
     QList<QSsl::ImplementedClass> implementedClasses() const override;
 
+    QTlsPrivate::TlsKey *createKey() const override;
     QTlsPrivate::X509Certificate *createCertificate() const override;
+    QTlsPrivate::TlsCryptograph *createTlsCryptograph() const override;
     QTlsPrivate::X509PemReaderPtr X509PemReader() const override;
     QTlsPrivate::X509DerReaderPtr X509DerReader() const override;
 
