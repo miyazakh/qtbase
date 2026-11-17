@@ -12,9 +12,13 @@
 #include <QtNetwork/qssl.h>
 #include <QtNetwork/qssldiffiehellmanparameters.h>
 
+#include <QtNetwork/private/qsslsocket_p.h>
+
+#include <QtCore/qdirlisting.h>
 #include <QtCore/qlist.h>
 #include <QtCore/qmutex.h>
 #include <QtCore/qscopeguard.h>
+#include <QtCore/qset.h>
 #include <QtCore/qstring.h>
 
 #include <algorithm>
@@ -30,7 +34,19 @@
 #include <wolfssl/wolfcrypt/ecc.h>
 #include <wolfssl/wolfcrypt/error-crypt.h>
 
+#ifdef Q_OS_WIN
+/* After the wolfSSL headers: wincrypt.h defines names such as X509_NAME. */
+#include "../shared/qwincrypt_p.h"
+#endif
+
 QT_BEGIN_NAMESPACE
+
+#ifdef Q_OS_DARWIN
+namespace QTlsPrivate {
+/* Defined in ../shared/qsslsocket_mac_shared.cpp */
+QList<QSslCertificate> systemCaCertificates();
+} /* namespace QTlsPrivate */
+#endif
 
 using namespace Qt::StringLiterals;
 
@@ -208,7 +224,66 @@ void QTlsBackendWolfSSL::ensureInitialized() const
     setDefaultCiphers(defaultCiphers);
 
     resetDefaultEllipticCurves();
-    /* TLSTODO (Phase 5): system CA certificates. */
+
+    /* Load the system CA certificates up front, as the OpenSSL backend does
+     * when it cannot load them on demand. wolfSSL has no native lookup of a
+     * missing issuer at verification time (OpenSSL's hashed directories), so
+     * root certificates are never loaded on demand; see
+     * QSslContext::init(). */
+    setDefaultCaCertificates(systemCaCertificates());
+}
+
+QList<QSslCertificate> QTlsBackendWolfSSL::systemCaCertificates() const
+{
+    /* The same stores as the OpenSSL backend. Qt reads them, not
+     * wolfSSL_CTX_load_system_CA_certs(), so that they also show up in
+     * QSslConfiguration::systemCaCertificates() and are used by
+     * QSslCertificate::verify(). */
+    QList<QSslCertificate> systemCerts;
+#if defined(Q_OS_DARWIN)
+    /* Trusted roots of the user, admin and system keychain domains (macOS
+     * only; the list is empty on iOS, as in the other backends). */
+    systemCerts = QTlsPrivate::systemCaCertificates();
+#elif defined(Q_OS_WIN)
+    /* The ROOT store of the current user, which includes the roots of the
+     * local machine. */
+    const auto hSystemStore = QHCertStorePointer(
+            CertOpenStore(CERT_STORE_PROV_SYSTEM, 0, 0,
+                          CERT_STORE_READONLY_FLAG
+                                  | CERT_SYSTEM_STORE_CURRENT_USER,
+                          L"ROOT"));
+    if (hSystemStore) {
+        PCCERT_CONTEXT pc = nullptr;
+        while ((pc = CertFindCertificateInStore(hSystemStore.get(),
+                                                X509_ASN_ENCODING, 0,
+                                                CERT_FIND_ANY, nullptr,
+                                                pc))) {
+            const QByteArray der(
+                    reinterpret_cast<const char *>(pc->pbCertEncoded),
+                    qsizetype(pc->cbCertEncoded));
+            systemCerts.append(QSslCertificate(der, QSsl::Der));
+        }
+    }
+#elif defined(Q_OS_UNIX) && !defined(Q_OS_ANDROID)
+    QSet<QString> certFiles = {
+        u"/etc/pki/tls/certs/ca-bundle.crt"_s, /* Fedora, Mandriva */
+        u"/usr/local/share/certs/ca-root-nss.crt"_s /* FreeBSD ca_root_nss */
+    };
+    static const QStringList nameFilters = { u"*.pem"_s, u"*.crt"_s };
+    const auto directories = QSslSocketPrivate::unixRootCertDirectories();
+    for (const QByteArray &directory : directories) {
+        for (const auto &dirEntry : QDirListing(QString::fromLocal8Bit(
+                                                        directory),
+                                                nameFilters)) {
+            /* Canonical paths: load a symlinked file only once. */
+            certFiles.insert(dirEntry.canonicalFilePath());
+        }
+    }
+    for (const QString &file : std::as_const(certFiles))
+        systemCerts.append(QSslCertificate::fromPath(file, QSsl::Pem));
+#endif
+    /* TLSTODO: Android (the OpenSSL backend asks the Java KeyStore). */
+    return systemCerts;
 }
 
 QString QTlsBackendWolfSSL::errorString(int errorCode)
