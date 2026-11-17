@@ -11,9 +11,13 @@
 #include <QtNetwork/qssl.h>
 #include <QtNetwork/qssldiffiehellmanparameters.h>
 
+#include <QtNetwork/private/qsslsocket_p.h>
+
+#include <QtCore/qdirlisting.h>
 #include <QtCore/qlist.h>
 #include <QtCore/qmutex.h>
 #include <QtCore/qscopeguard.h>
+#include <QtCore/qset.h>
 #include <QtCore/qstring.h>
 
 #include <algorithm>
@@ -207,7 +211,36 @@ void QTlsBackendWolfSSL::ensureInitialized() const
     setDefaultCiphers(defaultCiphers);
 
     resetDefaultEllipticCurves();
-    /* TLSTODO (Phase 5): system CA certificates. */
+
+    /* Load the system CA certificates up front, as the OpenSSL backend does
+     * when it cannot load them on demand. */
+    setDefaultCaCertificates(systemCaCertificates());
+}
+
+QList<QSslCertificate> QTlsBackendWolfSSL::systemCaCertificates() const
+{
+    QList<QSslCertificate> systemCerts;
+#if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN) && !defined(Q_OS_ANDROID)
+    /* The same files and directories as the OpenSSL backend. */
+    QSet<QString> certFiles = {
+        u"/etc/pki/tls/certs/ca-bundle.crt"_s, /* Fedora, Mandriva */
+        u"/usr/local/share/certs/ca-root-nss.crt"_s /* FreeBSD ca_root_nss */
+    };
+    static const QStringList nameFilters = { u"*.pem"_s, u"*.crt"_s };
+    const auto directories = QSslSocketPrivate::unixRootCertDirectories();
+    for (const QByteArray &directory : directories) {
+        for (const auto &dirEntry : QDirListing(QString::fromLocal8Bit(
+                                                        directory),
+                                                nameFilters)) {
+            /* Canonical paths: load a symlinked file only once. */
+            certFiles.insert(dirEntry.canonicalFilePath());
+        }
+    }
+    for (const QString &file : std::as_const(certFiles))
+        systemCerts.append(QSslCertificate::fromPath(file, QSsl::Pem));
+#endif
+    /* TLSTODO (Phase 5): Windows, macOS and Android system stores. */
+    return systemCerts;
 }
 
 QString QTlsBackendWolfSSL::errorString(int errorCode)

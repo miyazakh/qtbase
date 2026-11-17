@@ -55,6 +55,7 @@ private:
     long tlsLibraryBuildVersionNumber() const override;
     QString tlsLibraryBuildVersionString() const override;
     void ensureInitialized() const override;
+    QList<QSslCertificate> systemCaCertificates() const override;
 
     QString backendName() const override;
     QList<QSsl::SslProtocol> supportedProtocols() const override;
