@@ -113,6 +113,7 @@ private:
         OpenSSL,
         Schannel,
         SecureTransport,
+        WolfSSL,
         CertOnly,
         Unknown,
     };
@@ -127,6 +128,8 @@ private:
                 return TLSBackend::Schannel;
             if (active == "securetransport")
                 return TLSBackend::SecureTransport;
+            if (active == "wolfssl")
+                return TLSBackend::WolfSSL;
             if (active == "cert-only")
                 return TLSBackend::CertOnly;
             return TLSBackend::Unknown;
@@ -1109,8 +1112,10 @@ void tst_QSslCertificate::subjectAndIssuerAttributes()
 
 void tst_QSslCertificate::verify()
 {
-    if (currentBackend() != TLSBackend::OpenSSL)
-        QSKIP("Only implemented for OpenSSL");
+    if (currentBackend() != TLSBackend::OpenSSL
+        && currentBackend() != TLSBackend::WolfSSL) {
+        QSKIP("Only implemented for OpenSSL and wolfSSL");
+    }
 
     QList<QSslError> errors;
     QList<QSslCertificate> toVerify;
@@ -1142,7 +1147,14 @@ void tst_QSslCertificate::verify()
     toVerify = QSslCertificate::fromPath(testDataDir + "verify-certs/test-ocsp-good-cert.pem", QSsl::Pem, QSslCertificate::PatternSyntax::FixedString);
 
     errors = QSslCertificate::verify(toVerify);
-    VERIFY_VERBOSE(errors.size() == 0);
+    if (currentBackend() == TLSBackend::WolfSSL) {
+        /* The certificate has keyCertSign without the cA basic constraint,
+         * which wolfSSL rejects as RFC 5280 (4.2.1.9) requires. */
+        VERIFY_VERBOSE(errors.size() == 1);
+        VERIFY_VERBOSE(errors[0].error() == QSslError::InvalidPurpose);
+    } else {
+        VERIFY_VERBOSE(errors.size() == 0);
+    }
     errors.clear();
 
     // Test a blacklisted certificate
@@ -1461,8 +1473,10 @@ void tst_QSslCertificate::pkcs12()
     QSslCertificate cert;
     QList<QSslCertificate> caCerts;
 
-    if (currentBackend() != TLSBackend::OpenSSL)
+    if (currentBackend() != TLSBackend::OpenSSL
+        && currentBackend() != TLSBackend::WolfSSL) {
         QEXPECT_FAIL("", "pkcs12 imports are not available with the current TLS backend", Abort); // TODO?
+    }
 
     ok = QSslCertificate::importPkcs12(&f, &key, &cert, &caCerts);
     QVERIFY(ok);
