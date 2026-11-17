@@ -37,8 +37,10 @@ private Q_SLOTS:
 
 void tst_QSslDiffieHellmanParameters::initTestCase()
 {
-    if (QSslSocket::activeBackend() != QStringLiteral("openssl"))
+    if (!QSslSocket::implementedClasses().contains(
+                QSsl::ImplementedClass::DiffieHellman)) {
         QSKIP("The active TLS backend does not support QSslDiffieHellmanParameters");
+    }
 }
 
 void tst_QSslDiffieHellmanParameters::constructionEmpty()

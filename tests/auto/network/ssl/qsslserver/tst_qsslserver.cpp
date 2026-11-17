@@ -23,6 +23,8 @@ private slots:
     void testSelfSignedCertificateRejectedByClient();
 #if QT_CONFIG(openssl)
     void testHandshakeInterruptedOnError();
+#endif
+#if QT_CONFIG(openssl) || QT_CONFIG(wolfssl)
     void testPreSharedKeyAuthenticationRequired();
 #endif
     void plaintextClient();
@@ -32,6 +34,7 @@ private slots:
 private:
     QString testDataDir;
     bool isTestingOpenSsl = false;
+    bool isTestingWolfSsl = false;
     QSslConfiguration selfSignedClientQSslConfiguration();
     QSslConfiguration selfSignedServerQSslConfiguration();
     QSslConfiguration createQSslConfiguration(QString keyFileName, QString certificateFileName);
@@ -84,6 +87,8 @@ void tst_QSslServer::initTestCase()
     const auto &tlsBackends = QSslSocket::availableBackends();
     if (tlsBackends.contains(openSslBackend)) {
         isTestingOpenSsl = true;
+    } else if (tlsBackends.contains(QStringLiteral("wolfssl"))) {
+        isTestingWolfSsl = true;
     }
 }
 
@@ -164,8 +169,9 @@ void tst_QSslServer::testOneSuccessfulConnection()
                                   server.server.serverPort());
 
     // Type of certificate error to expect
-    const auto certificateError =
-            isTestingOpenSsl ? QSslError::SelfSignedCertificate : QSslError::CertificateUntrusted;
+    const auto certificateError = isTestingOpenSsl || isTestingWolfSsl
+            ? QSslError::SelfSignedCertificate
+            : QSslError::CertificateUntrusted;
     // Expected errors
     connect(&client, &QSslSocket::sslErrors,
             [&certificateError, &client](const QList<QSslError> &errors) {
@@ -242,8 +248,9 @@ void tst_QSslServer::testSelfSignedCertificateRejectedByServer()
     QCOMPARE(server.startedEncryptionHandshakeSpy.size(), 1);
 
     // Type of certificate error to expect
-    const auto certificateError =
-            isTestingOpenSsl ? QSslError::SelfSignedCertificate : QSslError::CertificateUntrusted;
+    const auto certificateError = isTestingOpenSsl || isTestingWolfSsl
+            ? QSslError::SelfSignedCertificate
+            : QSslError::CertificateUntrusted;
 
     // Check the sslErrorsSpy
     const auto sslErrorsSpyErrors =
@@ -383,15 +390,27 @@ void tst_QSslServer::testHandshakeInterruptedOnError()
     QCOMPARE(server.startedEncryptionHandshakeSpy.size(), 1);
 }
 
+#endif // QT_CONFIG(openssl)
+
+#if QT_CONFIG(openssl) || QT_CONFIG(wolfssl)
+
 void tst_QSslServer::testPreSharedKeyAuthenticationRequired()
 {
-    if (!isTestingOpenSsl)
-        QSKIP("This test requires OpenSSL as the active TLS backend");
+    if (!isTestingOpenSsl && !isTestingWolfSsl)
+        QSKIP("This test requires OpenSSL or wolfSSL");
+
+    /* wolfSSL has no static PSK suites by default; use one with an
+     * ephemeral ECDH key exchange, which does not authenticate the server
+     * either. */
+    const QSslCipher pskCipher(
+            isTestingWolfSsl ? QStringLiteral("ECDHE-PSK-AES128-CBC-SHA256")
+                             : QStringLiteral("PSK-AES256-CBC-SHA"));
+    QVERIFY(!pskCipher.isNull());
 
     auto serverConfiguration = QSslConfiguration::defaultConfiguration();
     serverConfiguration.setPeerVerifyMode(QSslSocket::VerifyPeer);
     serverConfiguration.setProtocol(QSsl::TlsV1_2);
-    serverConfiguration.setCiphers({ QSslCipher("PSK-AES256-CBC-SHA") });
+    serverConfiguration.setCiphers({ pskCipher });
     serverConfiguration.setPreSharedKeyIdentityHint("Server Y");
     SslServerSpy server(serverConfiguration);
     connect(&server.server, &QSslServer::preSharedKeyAuthenticationRequired,
@@ -405,7 +424,7 @@ void tst_QSslServer::testPreSharedKeyAuthenticationRequired()
     auto clientConfiguration = QSslConfiguration::defaultConfiguration();
     clientConfiguration.setPeerVerifyMode(QSslSocket::VerifyNone);
     clientConfiguration.setProtocol(QSsl::TlsV1_2);
-    clientConfiguration.setCiphers({ QSslCipher("PSK-AES256-CBC-SHA") });
+    clientConfiguration.setCiphers({ pskCipher });
     client.setSslConfiguration(clientConfiguration);
     connect(&client, &QSslSocket::preSharedKeyAuthenticationRequired,
             [](QSslPreSharedKeyAuthenticator *authenticator) {
