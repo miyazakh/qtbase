@@ -6,13 +6,20 @@ qt_internal_add_plugin(QTlsBackendWolfSSLPlugin
     CLASS_NAME QTlsBackendWolfSSL
     PLUGIN_TYPE tls
     SOURCES
+        ../shared/qtlskey_base_p.h
+        ../shared/qtlskey_base.cpp
+        ../shared/qtlskey_generic_p.h
+        ../shared/qtlskey_generic.cpp
         ../shared/qx509_base_p.h
         ../shared/qx509_base.cpp
         ../shared/qx509_generic_p.h
         ../shared/qx509_generic.cpp
         ../shared/qasn1element_p.h
         ../shared/qasn1element.cpp
+        qsslcontext_wolfssl.cpp qsslcontext_wolfssl_p.h
+        qtls_wolfssl.cpp qtls_wolfssl_p.h
         qtlsbackend_wolfssl.cpp qtlsbackend_wolfssl_p.h
+        qtlskey_wolfssl.cpp qtlskey_wolfssl_p.h
     LIBRARIES
         Qt::NetworkPrivate
         WrapWolfSSL::WrapWolfSSL
