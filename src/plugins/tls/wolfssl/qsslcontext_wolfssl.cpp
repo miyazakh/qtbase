@@ -331,9 +331,11 @@ QT_WARNING_POP
         }
     }
 
-    /* TLSTODO (Phase 5): load the system CA certificates
-     * (wolfSSL_CTX_load_system_CA_certs()) when on-demand loading is allowed.
-     */
+    /* The system CA certificates are already in the default configuration
+     * (QTlsBackendWolfSSL::ensureInitialized()), so there is nothing to load
+     * on demand: the backend never reports on-demand loading as supported.
+     * On Windows this also means that missing roots are not fetched from
+     * Windows Update during the handshake, unlike the OpenSSL backend. */
     Q_UNUSED(allowRootCertOnDemandLoading);
 
     /* Local certificate and private key */
