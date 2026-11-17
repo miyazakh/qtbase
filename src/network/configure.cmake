@@ -13,6 +13,10 @@ qt_find_package(GSSAPI PROVIDED_TARGETS GSSAPI::GSSAPI MODULE_NAME network QMAKE
 qt_find_package(GLIB2 OPTIONAL_COMPONENTS GOBJECT PROVIDED_TARGETS GLIB2::GOBJECT MODULE_NAME core QMAKE_LIB gobject)
 qt_find_package(GLIB2 OPTIONAL_COMPONENTS GIO PROVIDED_TARGETS GLIB2::GIO MODULE_NAME core QMAKE_LIB gio)
 qt_find_package(WrapResolv PROVIDED_TARGETS WrapResolv::WrapResolv MODULE_NAME network QMAKE_LIB libresolv)
+qt_find_package(WrapWolfSSL
+    PROVIDED_TARGETS WrapWolfSSL::WrapWolfSSL
+    MODULE_NAME network
+    QMAKE_LIB wolfssl)
 
 #### Tests
 
@@ -125,6 +129,42 @@ socklen_t sctpInitMsgSize = sizeof(sctpInitMsg);
 "# FIXME: use: unmapped library: network
 )
 
+# wolfssl
+qt_config_compile_test(wolfssl
+    LABEL "wolfSSL 5.9.2 or later"
+    LIBRARIES
+        WrapWolfSSL::WrapWolfSSL
+    CODE
+"#include <wolfssl/options.h>
+#include <wolfssl/ssl.h>
+#include <wolfssl/version.h>
+#if !defined(LIBWOLFSSL_VERSION_HEX) || LIBWOLFSSL_VERSION_HEX < 0x05009002
+#  error wolfSSL 5.9.2 or later is required
+#endif
+#if defined(WOLFSSL_NO_TLS12) || !defined(WOLFSSL_TLS13)
+#  error wolfSSL without TLS 1.2 or TLS 1.3 support
+#endif
+#if !defined(SESSION_CERTS)
+#  error wolfSSL without the peer certificate chain (--enable-sessioncerts)
+#endif
+#if !defined(WOLFSSL_ALWAYS_VERIFY_CB)
+#  error wolfSSL without WOLFSSL_ALWAYS_VERIFY_CB
+#endif
+
+int main(void)
+{
+    /* BEGIN TEST: */
+wolfSSL_Init();
+WOLFSSL_CTX *ctx = wolfSSL_CTX_new(wolfTLS_client_method());
+wolfSSL_CTX_SetIORecv(ctx, nullptr);
+wolfSSL_CTX_SetIOSend(ctx, nullptr);
+wolfSSL_CTX_free(ctx);
+wolfSSL_Cleanup();
+    /* END TEST: */
+    return 0;
+}
+")
+
 # dtls
 qt_config_compile_test(dtls
     LABEL "DTLS support in OpenSSL"
@@ -231,9 +271,17 @@ qt_feature("schannel" PUBLIC
     DISABLE INPUT_ssl STREQUAL 'no'
 )
 qt_feature_definition("schannel" "QT_SCHANNEL")
+qt_feature("wolfssl" PUBLIC
+    LABEL "wolfSSL"
+    PURPOSE "Provides a TLS backend based on wolfSSL."
+    AUTODETECT OFF
+    CONDITION WrapWolfSSL_FOUND AND TEST_wolfssl
+    DISABLE INPUT_ssl STREQUAL 'no'
+)
 qt_feature("ssl" PUBLIC
     LABEL "SSL"
     CONDITION QT_FEATURE_securetransport OR QT_FEATURE_openssl OR QT_FEATURE_schannel
+        OR QT_FEATURE_wolfssl
 )
 qt_feature_definition("ssl" "QT_NO_SSL" NEGATE VALUE "1")
 qt_feature("dtls" PUBLIC
@@ -374,6 +422,7 @@ qt_configure_add_summary_entry(
     ARGS "schannel"
     CONDITION WIN32
 )
+qt_configure_add_summary_entry(ARGS "wolfssl")
 qt_configure_add_summary_entry(ARGS "dtls")
 qt_configure_add_summary_entry(ARGS "ocsp")
 qt_configure_add_summary_entry(ARGS "sctp")
