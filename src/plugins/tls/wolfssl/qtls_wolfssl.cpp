@@ -7,6 +7,7 @@
 #include "qtls_wolfssl_p.h"
 #include "qsslcontext_wolfssl_p.h"
 #include "qtlsbackend_wolfssl_p.h"
+#include "qx509_wolfssl_p.h"
 
 #include <QtNetwork/private/qsslcertificate_p.h>
 #include <QtNetwork/private/qsslsocket_p.h>
@@ -43,43 +44,6 @@ bool isWantReadOrWrite(int error)
 {
     return error == WOLFSSL_ERROR_WANT_READ
             || error == WOLFSSL_ERROR_WANT_WRITE;
-}
-
-QSslError::SslError qSslErrorFromWolfSSL(int code, int depth,
-                                         const QList<QSslCertificate> &chain)
-{
-    /* Translates the errors wolfSSL passes to the verify callback (its own
-     * error codes; OPENSSL_COMPATIBLE_DEFAULTS is not used).
-     * TLSTODO (Phase 3): complete this table and check it against
-     * tst_qsslsocket's verification tests. */
-    switch (code) {
-    case ASN_NO_SIGNER_E: {
-        const QSslCertificate cert = chain.value(depth);
-        if (!cert.isNull() && cert.isSelfSigned())
-            return depth == 0 ? QSslError::SelfSignedCertificate
-                              : QSslError::SelfSignedCertificateInChain;
-        if (!chain.isEmpty() && chain.constLast().isSelfSigned())
-            return QSslError::SelfSignedCertificateInChain;
-        return QSslError::UnableToGetLocalIssuerCertificate;
-    }
-    case ASN_SELF_SIGNED_E:
-        return depth == 0 ? QSslError::SelfSignedCertificate
-                          : QSslError::SelfSignedCertificateInChain;
-    case ASN_AFTER_DATE_E:
-        return QSslError::CertificateExpired;
-    case ASN_BEFORE_DATE_E:
-        return QSslError::CertificateNotYetValid;
-    case ASN_SIG_CONFIRM_E:
-    case ASN_SIG_OID_E:
-    case ASN_SIG_HASH_E:
-    case ASN_SIG_KEY_E:
-        return QSslError::CertificateSignatureFailed;
-    case ASN_PATHLEN_SIZE_E:
-    case ASN_PATHLEN_INV_E:
-        return QSslError::PathLengthExceeded;
-    default:
-        return QSslError::UnspecifiedError;
-    }
 }
 
 } /* unnamed namespace */
@@ -601,13 +565,20 @@ bool TlsCryptographWolfSSL::verifyPeer()
     };
 
     /* Errors collected by the verify callback during the handshake. */
+    QList<QSslError> chainErrors;
     for (const CertificateError &error : std::as_const(certificateErrors)) {
         const QSslCertificate cert = peerCertificateChain.value(error.depth);
-        if (!addError(QSslError(qSslErrorFromWolfSSL(error.code, error.depth,
-                                                     peerCertificateChain),
-                                cert))) {
+        const QSslError sslError(
+                X509CertificateWolfSSL::sslErrorFromWolfSSL(
+                        error.code, error.depth, peerCertificateChain),
+                cert);
+        if (!chainErrors.contains(sslError))
+            chainErrors << sslError;
+    }
+    X509CertificateWolfSSL::addValidityErrors(&chainErrors);
+    for (const QSslError &error : std::as_const(chainErrors)) {
+        if (!addError(error))
             return false;
-        }
     }
 
     /* Check the whole chain for blacklisting (including the root). */

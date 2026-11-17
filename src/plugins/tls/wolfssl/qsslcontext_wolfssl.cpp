@@ -14,6 +14,7 @@
 #include <QtNetwork/qsslcertificate.h>
 #include <QtNetwork/qsslcipher.h>
 #include <QtNetwork/qssldiffiehellmanparameters.h>
+#include <QtNetwork/qsslellipticcurve.h>
 #include <QtNetwork/qsslkey.h>
 
 #include <QtCore/qdatetime.h>
@@ -418,9 +419,8 @@ QT_WARNING_POP
     if (!configuration.sessionTicket().isEmpty())
         m_sessionASN1 = configuration.sessionTicket();
 
-    /* Diffie-Hellman parameters (server side, TLS 1.2 DHE suites).
-     * TLSTODO (Phase 3): parse and validate QSslDiffieHellmanParameters in
-     * the backend (dhParametersFromDer/Pem). */
+    /* Diffie-Hellman parameters (server side, TLS 1.2 DHE suites), validated
+     * by QTlsBackendWolfSSL::dhParametersFromDer/Pem(). */
     const QSslDiffieHellmanParameters dhParameters
             = configuration.diffieHellmanParameters();
     if (!dhParameters.isValid()) {
@@ -454,12 +454,40 @@ QT_WARNING_POP
      * (docs/design-io-bridge.md 11.5). */
 #endif /* !NO_PSK */
 
-    /* TLSTODO (Phase 3): elliptic curves (QSslConfiguration::ellipticCurves()
-     * -> wolfSSL_CTX_set_groups()). */
-    if (!configuration.ellipticCurves().isEmpty()) {
-        qCWarning(lcTlsBackendWolfSSL,
-                  "Setting elliptic curves is not supported yet, using "
-                  "wolfSSL's defaults");
+    /* Elliptic curves, in the order of preference given. wolfSSL takes the
+     * TLS group code points, which are the QSslEllipticCurve ids of this
+     * backend; this sets both supported_groups and the TLS 1.3 key shares. */
+    const QList<QSslEllipticCurve> curves = configuration.ellipticCurves();
+    if (!curves.isEmpty()) {
+        QList<int> groups;
+        for (const QSslEllipticCurve &curve : curves) {
+            const int group = QTlsBackendWolfSSL::tlsGroupForCurve(curve.id);
+            if (group && !groups.contains(group))
+                groups << group;
+        }
+        if (groups.isEmpty()) {
+            setError(QSslSocket::tr(
+                             "Error when setting the elliptic curves (%1)")
+                             .arg(QSslSocket::tr(
+                                     "no curve is supported by wolfSSL")));
+            return;
+        }
+        if (groups.size() > WOLFSSL_MAX_GROUP_COUNT) {
+            setError(QSslSocket::tr(
+                             "Error when setting the elliptic curves (%1)")
+                             .arg(QSslSocket::tr(
+                                          "wolfSSL accepts at most %1 curves")
+                                          .arg(WOLFSSL_MAX_GROUP_COUNT)));
+            return;
+        }
+        const int ret = wolfSSL_CTX_set_groups(ctx, groups.data(),
+                                               int(groups.size()));
+        if (ret != WOLFSSL_SUCCESS) {
+            setError(QSslSocket::tr(
+                             "Error when setting the elliptic curves (%1)")
+                             .arg(QTlsBackendWolfSSL::errorString(ret)));
+            return;
+        }
     }
 }
 
