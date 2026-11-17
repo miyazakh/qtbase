@@ -20,6 +20,7 @@ qt_internal_add_plugin(QTlsBackendWolfSSLPlugin
         qtls_wolfssl.cpp qtls_wolfssl_p.h
         qtlsbackend_wolfssl.cpp qtlsbackend_wolfssl_p.h
         qtlskey_wolfssl.cpp qtlskey_wolfssl_p.h
+        qx509_wolfssl.cpp qx509_wolfssl_p.h
     LIBRARIES
         Qt::NetworkPrivate
         WrapWolfSSL::WrapWolfSSL
