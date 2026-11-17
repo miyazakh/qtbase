@@ -44,6 +44,9 @@ public:
     /* A QSslCipher for one of wolfSSL's own suite names, such as
      * "ECDHE-RSA-AES128-GCM-SHA256" or "TLS13-AES128-GCM-SHA256". */
     static QSslCipher ciphersuiteFromName(QLatin1StringView name);
+    /* The TLS supported group (IANA "TLS Supported Groups" registry) for a
+     * QSslEllipticCurve id, or 0. The ids are those code points. */
+    static int tlsGroupForCurve(int curveId);
 
 private:
     bool isValid() const override;
@@ -61,8 +64,22 @@ private:
     QTlsPrivate::TlsKey *createKey() const override;
     QTlsPrivate::X509Certificate *createCertificate() const override;
     QTlsPrivate::TlsCryptograph *createTlsCryptograph() const override;
+    QTlsPrivate::X509ChainVerifyPtr X509Verifier() const override;
     QTlsPrivate::X509PemReaderPtr X509PemReader() const override;
     QTlsPrivate::X509DerReaderPtr X509DerReader() const override;
+    QTlsPrivate::X509Pkcs12ReaderPtr X509Pkcs12Reader() const override;
+
+    QList<int> ellipticCurvesIds() const override;
+    int curveIdFromShortName(const QString &name) const override;
+    int curveIdFromLongName(const QString &name) const override;
+    QString shortNameForId(int cid) const override;
+    QString longNameForId(int cid) const override;
+    bool isTlsNamedCurve(int cid) const override;
+
+    int dhParametersFromDer(const QByteArray &derData,
+                            QByteArray *data) const override;
+    int dhParametersFromPem(const QByteArray &pemData,
+                            QByteArray *data) const override;
 
     bool m_libraryInitialized = false;
 };

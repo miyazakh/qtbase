@@ -27,12 +27,17 @@ QT_BEGIN_NAMESPACE
 
 namespace QTlsPrivate {
 
-/* Keys are parsed by Qt's generic ASN.1 code; the backend only supplies the
- * symmetric ciphers used for encrypted PEM/PKCS#8 keys. */
+/* Keys are parsed by Qt's generic ASN.1 code. The backend supplies the
+ * symmetric ciphers used for encrypted PEM keys, and decrypts encrypted
+ * PKCS#8 keys with wolfCrypt, which also knows the PBES2/AES and PKCS#12
+ * schemes that the generic code does not. */
 class TlsKeyWolfSSL final : public TlsKeyGeneric
 {
 public:
     using TlsKeyGeneric::TlsKeyGeneric;
+
+    void decodeDer(KeyType type, KeyAlgorithm algorithm, const QByteArray &der,
+                   const QByteArray &passPhrase, bool deepClear) override;
 
     QByteArray decrypt(Cipher cipher, const QByteArray &data,
                        const QByteArray &key,

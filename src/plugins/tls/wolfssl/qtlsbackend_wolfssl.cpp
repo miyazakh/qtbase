@@ -6,10 +6,10 @@
 #include "qtlsbackend_wolfssl_p.h"
 #include "qtls_wolfssl_p.h"
 #include "qtlskey_wolfssl_p.h"
-
-#include "../shared/qx509_generic_p.h"
+#include "qx509_wolfssl_p.h"
 
 #include <QtNetwork/qssl.h>
+#include <QtNetwork/qssldiffiehellmanparameters.h>
 
 #include <QtCore/qlist.h>
 #include <QtCore/qmutex.h>
@@ -25,6 +25,9 @@
 #include <wolfssl/options.h>
 #include <wolfssl/ssl.h>
 #include <wolfssl/version.h>
+#include <wolfssl/wolfcrypt/dh.h>
+#include <wolfssl/wolfcrypt/ecc.h>
+#include <wolfssl/wolfcrypt/error-crypt.h>
 
 QT_BEGIN_NAMESPACE
 
@@ -114,19 +117,21 @@ QList<QSsl::SupportedFeature> QTlsBackendWolfSSL::supportedFeatures() const
 #if defined(HAVE_SESSION_TICKET) && defined(HAVE_EXT_CACHE)
     features << QSsl::SupportedFeature::SessionTicket;
 #endif
-    /* Not supported: CertificateVerification (Phase 3), OCSP (out of scope),
-     * Alerts, and interrupting the handshake on verification errors (QtNetwork
-     * only supports the latter with OpenSSL). */
+    features << QSsl::SupportedFeature::CertificateVerification;
+    /* Not supported: OCSP (out of scope), Alerts, and interrupting the
+     * handshake on verification errors (QtNetwork only supports the latter
+     * with OpenSSL). */
     return features;
 }
 
 QList<QSsl::ImplementedClass> QTlsBackendWolfSSL::implementedClasses() const
 {
-    /* TLSTODO (Phase 3): DiffieHellman and EllipticCurve. */
     return {
         QSsl::ImplementedClass::Key,
         QSsl::ImplementedClass::Certificate,
         QSsl::ImplementedClass::Socket,
+        QSsl::ImplementedClass::DiffieHellman,
+        QSsl::ImplementedClass::EllipticCurve,
     };
 }
 
@@ -201,8 +206,8 @@ void QTlsBackendWolfSSL::ensureInitialized() const
     setDefaultSupportedCiphers(ciphers);
     setDefaultCiphers(defaultCiphers);
 
-    /* TLSTODO (Phase 3): elliptic curves (resetDefaultEllipticCurves()).
-     * TLSTODO (Phase 5): system CA certificates. */
+    resetDefaultEllipticCurves();
+    /* TLSTODO (Phase 5): system CA certificates. */
 }
 
 QString QTlsBackendWolfSSL::errorString(int errorCode)
@@ -317,7 +322,12 @@ QTlsPrivate::TlsCryptograph *QTlsBackendWolfSSL::createTlsCryptograph() const
 
 QTlsPrivate::X509Certificate *QTlsBackendWolfSSL::createCertificate() const
 {
-    return new QTlsPrivate::X509CertificateGeneric;
+    return new QTlsPrivate::X509CertificateWolfSSL;
+}
+
+QTlsPrivate::X509ChainVerifyPtr QTlsBackendWolfSSL::X509Verifier() const
+{
+    return QTlsPrivate::X509CertificateWolfSSL::verify;
 }
 
 QTlsPrivate::X509PemReaderPtr QTlsBackendWolfSSL::X509PemReader() const
@@ -328,6 +338,291 @@ QTlsPrivate::X509PemReaderPtr QTlsBackendWolfSSL::X509PemReader() const
 QTlsPrivate::X509DerReaderPtr QTlsBackendWolfSSL::X509DerReader() const
 {
     return QTlsPrivate::X509CertificateGeneric::certificatesFromDer;
+}
+
+QTlsPrivate::X509Pkcs12ReaderPtr QTlsBackendWolfSSL::X509Pkcs12Reader() const
+{
+    return QTlsPrivate::X509CertificateWolfSSL::importPkcs12;
+}
+
+namespace {
+
+/* Elliptic curves. QSslEllipticCurve ids are opaque; this backend uses the
+ * code points of the IANA "TLS Supported Groups" registry, which wolfSSL
+ * takes directly (wolfSSL_CTX_set_groups()), and lists only curves that have
+ * one. Names are the OpenSSL short names Qt applications already use, plus
+ * the NIST names as aliases. */
+struct CurveInfo
+{
+    int group;
+    int eccCurveId; /* wolfCrypt's ecc_curve_id; -1 for X25519/X448 */
+    const char *name;
+    const char *nistName;
+};
+
+constexpr CurveInfo curveTable[] = {
+        /* RFC 4492 / RFC 8422 */
+        {WOLFSSL_ECC_SECP160K1, ECC_SECP160K1, "secp160k1", nullptr},
+        {WOLFSSL_ECC_SECP160R1, ECC_SECP160R1, "secp160r1", nullptr},
+        {WOLFSSL_ECC_SECP160R2, ECC_SECP160R2, "secp160r2", nullptr},
+        {WOLFSSL_ECC_SECP192K1, ECC_SECP192K1, "secp192k1", nullptr},
+        {WOLFSSL_ECC_SECP192R1, ECC_SECP192R1, "prime192v1", "P-192"},
+        {WOLFSSL_ECC_SECP224K1, ECC_SECP224K1, "secp224k1", nullptr},
+        {WOLFSSL_ECC_SECP224R1, ECC_SECP224R1, "secp224r1", "P-224"},
+        {WOLFSSL_ECC_SECP256K1, ECC_SECP256K1, "secp256k1", nullptr},
+        {WOLFSSL_ECC_SECP256R1, ECC_SECP256R1, "prime256v1", "P-256"},
+        {WOLFSSL_ECC_SECP384R1, ECC_SECP384R1, "secp384r1", "P-384"},
+        {WOLFSSL_ECC_SECP521R1, ECC_SECP521R1, "secp521r1", "P-521"},
+        /* RFC 7027 */
+        {WOLFSSL_ECC_BRAINPOOLP256R1, ECC_BRAINPOOLP256R1, "brainpoolP256r1",
+         nullptr},
+        {WOLFSSL_ECC_BRAINPOOLP384R1, ECC_BRAINPOOLP384R1, "brainpoolP384r1",
+         nullptr},
+        {WOLFSSL_ECC_BRAINPOOLP512R1, ECC_BRAINPOOLP512R1, "brainpoolP512r1",
+         nullptr},
+        /* RFC 7748 / RFC 8422 */
+        {WOLFSSL_ECC_X25519, -1, "X25519", nullptr},
+        {WOLFSSL_ECC_X448, -1, "X448", nullptr},
+};
+
+bool isCompiledIn(const CurveInfo &curve)
+{
+#ifdef HAVE_ECC
+    if (curve.eccCurveId >= 0)
+        return wc_ecc_get_curve_idx(curve.eccCurveId) >= 0;
+#endif
+#ifdef HAVE_CURVE25519
+    if (curve.group == WOLFSSL_ECC_X25519)
+        return true;
+#endif
+#ifdef HAVE_CURVE448
+    if (curve.group == WOLFSSL_ECC_X448)
+        return true;
+#endif
+    return false;
+}
+
+const CurveInfo *findCurve(int group)
+{
+    for (const CurveInfo &curve : curveTable) {
+        if (curve.group == group)
+            return isCompiledIn(curve) ? &curve : nullptr;
+    }
+    return nullptr;
+}
+
+const CurveInfo *findCurve(const QString &name)
+{
+    if (name.isEmpty())
+        return nullptr;
+    for (const CurveInfo &curve : curveTable) {
+        if (name == QLatin1StringView(curve.name)
+            || (curve.nistName && name == QLatin1StringView(curve.nistName))) {
+            return isCompiledIn(curve) ? &curve : nullptr;
+        }
+    }
+    return nullptr;
+}
+
+} /* unnamed namespace */
+
+int QTlsBackendWolfSSL::tlsGroupForCurve(int curveId)
+{
+    return findCurve(curveId) ? curveId : 0;
+}
+
+QList<int> QTlsBackendWolfSSL::ellipticCurvesIds() const
+{
+    QList<int> ids;
+    for (const CurveInfo &curve : curveTable) {
+        if (isCompiledIn(curve))
+            ids << curve.group;
+    }
+    return ids;
+}
+
+int QTlsBackendWolfSSL::curveIdFromShortName(const QString &name) const
+{
+    const CurveInfo *curve = findCurve(name);
+    return curve ? curve->group : 0;
+}
+
+int QTlsBackendWolfSSL::curveIdFromLongName(const QString &name) const
+{
+    /* As with OpenSSL, long and short names are the same for these curves. */
+    return curveIdFromShortName(name);
+}
+
+QString QTlsBackendWolfSSL::shortNameForId(int id) const
+{
+    const CurveInfo *curve = findCurve(id);
+    return curve ? QString::fromLatin1(curve->name) : QString();
+}
+
+QString QTlsBackendWolfSSL::longNameForId(int id) const
+{
+    return shortNameForId(id);
+}
+
+bool QTlsBackendWolfSSL::isTlsNamedCurve(int id) const
+{
+    /* Only curves with a TLS code point are listed. */
+    return findCurve(id) != nullptr;
+}
+
+namespace {
+
+/* Remainder of the big-endian unsigned integer 'number' divided by 'divisor'.
+ */
+unsigned remainder(QByteArrayView number, unsigned divisor)
+{
+    unsigned result = 0;
+    for (const char byte : number)
+        result = (result * 256 + static_cast<unsigned char>(byte)) % divisor;
+    return result;
+}
+
+QByteArrayView withoutLeadingZeros(QByteArrayView number)
+{
+    while (!number.isEmpty() && number.front() == '\0')
+        number = number.sliced(1);
+    return number;
+}
+
+int numberOfBits(QByteArrayView number)
+{
+    number = withoutLeadingZeros(number);
+    if (number.isEmpty())
+        return 0;
+    int bits = int(number.size() - 1) * 8;
+    for (unsigned top = static_cast<unsigned char>(number.front()); top;
+         top >>= 1)
+        ++bits;
+    return bits;
+}
+
+#ifndef NO_DH
+bool isPrime(QByteArrayView number, QByteArrayView generator)
+{
+    /* wolfCrypt's untrusted-parameter check is a Miller-Rabin test of the
+     * modulus with random bases (RFC 7919 groups are recognised directly). */
+    DhKey key;
+    if (wc_InitDhKey(&key) != 0)
+        return false;
+    const int result = wc_DhSetCheckKey(
+            &key, reinterpret_cast<const byte *>(number.data()),
+            word32(number.size()),
+            reinterpret_cast<const byte *>(generator.data()),
+            word32(generator.size()), nullptr, 0, 0, nullptr);
+    wc_FreeDhKey(&key);
+    return result == 0;
+}
+#endif /* !NO_DH */
+
+} /* unnamed namespace */
+
+int QTlsBackendWolfSSL::dhParametersFromDer(const QByteArray &der,
+                                            QByteArray *data) const
+{
+    /* The same checks as the OpenSSL backend's (DH_check()): p must be a safe
+     * prime of at least 1024 bits and g a suitable generator. */
+    using DHParams = QSslDiffieHellmanParameters;
+    Q_ASSERT(data);
+
+    if (der.isEmpty())
+        return DHParams::InvalidInputDataError;
+
+#ifndef NO_DH
+    /* Large enough for 16384-bit parameters. */
+    QByteArray p(2048 + 1, Qt::Uninitialized);
+    QByteArray g(2048 + 1, Qt::Uninitialized);
+    auto pSize = word32(p.size());
+    auto gSize = word32(g.size());
+    if (wc_DhParamsLoad(reinterpret_cast<const byte *>(der.constData()),
+                        word32(der.size()), reinterpret_cast<byte *>(p.data()),
+                        &pSize, reinterpret_cast<byte *>(g.data()), &gSize)
+        != 0) {
+        return DHParams::InvalidInputDataError;
+    }
+    const QByteArrayView prime
+            = withoutLeadingZeros(QByteArrayView(p).first(pSize));
+    const QByteArrayView generator
+            = withoutLeadingZeros(QByteArrayView(g).first(gSize));
+
+    if (numberOfBits(prime) < 1024 || !(prime.back() & 1))
+        return DHParams::UnsafeParametersError;
+
+    /* g > 1, and shorter than p (so that g < p - 1) */
+    if (numberOfBits(generator) < 2
+        || numberOfBits(generator) >= numberOfBits(prime)) {
+        return DHParams::UnsafeParametersError;
+    }
+
+    /* As in the OpenSSL backend, accept the IETF groups (p mod 24 == 23)
+     * as well as OpenSSL's own (p mod 24 == 11) for g == 2. */
+    if (numberOfBits(generator) <= 8) {
+        const unsigned g = static_cast<unsigned char>(generator.back());
+        if (g == 2) {
+            const unsigned residue = remainder(prime, 24);
+            if (residue != 11 && residue != 23)
+                return DHParams::UnsafeParametersError;
+        } else if (g == 5) {
+            const unsigned residue = remainder(prime, 10);
+            if (residue != 3 && residue != 7)
+                return DHParams::UnsafeParametersError;
+        }
+    }
+
+    /* p and q = (p - 1) / 2 must both be prime. p is odd, so q is p shifted
+     * right by one bit. */
+    QByteArray q(prime.size(), Qt::Uninitialized);
+    unsigned carry = 0;
+    for (qsizetype i = 0; i < prime.size(); ++i) {
+        const unsigned byte = static_cast<unsigned char>(prime.at(i));
+        q[i] = char((byte >> 1) | (carry << 7));
+        carry = byte & 1;
+    }
+    if (!isPrime(prime, generator)
+        || !isPrime(withoutLeadingZeros(q), QByteArrayView("\x02", 1))) {
+        return DHParams::UnsafeParametersError;
+    }
+
+    *data = der;
+    return DHParams::NoError;
+#else
+    Q_UNUSED(data);
+    qCWarning(lcTlsBackendWolfSSL,
+              "Diffie-Hellman parameters are not supported: "
+              "wolfSSL was built without DH");
+    return DHParams::InvalidInputDataError;
+#endif /* !NO_DH */
+}
+
+int QTlsBackendWolfSSL::dhParametersFromPem(const QByteArray &pem,
+                                            QByteArray *data) const
+{
+    using DHParams = QSslDiffieHellmanParameters;
+    Q_ASSERT(data);
+
+    static constexpr QByteArrayView begin("-----BEGIN DH PARAMETERS-----");
+    static constexpr QByteArrayView end("-----END DH PARAMETERS-----");
+    const qsizetype beginIndex = pem.indexOf(begin);
+    if (beginIndex == -1)
+        return DHParams::InvalidInputDataError;
+    const qsizetype bodyIndex = beginIndex + begin.size();
+    const qsizetype endIndex = pem.indexOf(end, bodyIndex);
+    if (endIndex == -1)
+        return DHParams::InvalidInputDataError;
+
+    QByteArray body = pem.mid(bodyIndex, endIndex - bodyIndex);
+    body.removeIf([](char c) {
+        return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+    });
+    const auto decoded = QByteArray::fromBase64Encoding(
+            body, QByteArray::AbortOnBase64DecodingErrors);
+    if (!decoded)
+        return DHParams::InvalidInputDataError;
+    return dhParametersFromDer(*decoded, data);
 }
 
 QT_END_NAMESPACE
