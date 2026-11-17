@@ -99,6 +99,7 @@ private:
     bool isOpenSslResolved = false;
     bool isSecureTransport = false;
     bool isSchannel = false;
+    bool isWolfSsl = false;
 };
 
 tst_QSslKey::tst_QSslKey()
@@ -142,6 +143,7 @@ tst_QSslKey::tst_QSslKey()
 
     if (!isOpenSsl && !isSecureTransport)
         isSchannel = backendName == QStringLiteral("schannel");
+    isWolfSsl = backendName == QStringLiteral("wolfssl");
 #else
     unsupportedCurves = {}; // not unsued anymore.
 #endif
@@ -165,6 +167,14 @@ bool tst_QSslKey::algorithmsSupported(const QString &fileName) const
     if (isSchannel || isSecureTransport) {
         // No AES support in the generic back-end, PKCS#12 algorithms not supported either.
         return !(fileName.contains(QRegularExpression("-aes\\d\\d\\d-")) || fileName.contains("pkcs8-pkcs12"));
+    }
+
+    if (isWolfSsl) {
+        /* wolfCrypt has no 2-key 3DES, RC2-128 or RC4 PKCS#12 PBE. */
+        const auto name = fileName.toLower();
+        return !name.contains("pkcs12-pbe-sha1-2des")
+                && !name.contains("pkcs12-pbe-sha1-rc2-128")
+                && !name.contains("pkcs12-pbe-sha1-rc4-");
     }
 
     if (!isOpenSsl || QSslSocket::sslLibraryVersionNumber() >> 28 < 3)
