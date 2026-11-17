@@ -32,10 +32,10 @@ private Q_SLOTS:
 
 void tst_QSslEllipticCurve::initTestCase()
 {
-    // At the moment only OpenSSL backend properly supports
-    // QSslEllipticCurve.
-    if (QSslSocket::activeBackend() != QStringLiteral("openssl"))
+    if (!QSslSocket::implementedClasses().contains(
+                QSsl::ImplementedClass::EllipticCurve)) {
         QSKIP("The active TLS backend does not support QSslEllipticCurve");
+    }
 }
 
 void tst_QSslEllipticCurve::constExpr()
