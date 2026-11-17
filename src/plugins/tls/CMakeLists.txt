@@ -13,4 +13,8 @@ if (QT_FEATURE_schannel AND QT_FEATURE_ssl)
     add_subdirectory(schannel)
 endif()
 
+if(QT_FEATURE_wolfssl AND QT_FEATURE_ssl)
+    add_subdirectory(wolfssl)
+endif()
+
 add_subdirectory(certonly)
