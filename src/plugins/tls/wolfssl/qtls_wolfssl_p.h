@@ -19,6 +19,8 @@
 
 #include <QtNetwork/private/qtnetworkglobal_p.h>
 
+#include "qsslcontext_wolfssl_p.h"
+
 #include <QtNetwork/private/qsslsocket_p.h>
 #include <QtNetwork/private/qtlsbackend_p.h>
 
@@ -29,13 +31,7 @@
 
 #include <memory>
 
-struct WOLFSSL;
-struct WOLFSSL_SESSION;
-struct WOLFSSL_X509_STORE_CTX;
-
 QT_BEGIN_NAMESPACE
-
-class QSslContext;
 
 namespace QTlsPrivate {
 
@@ -46,7 +42,8 @@ namespace QTlsPrivate {
  * backend does (docs/design-io-bridge.md, chapters 2 and 3). The callbacks
  * never emit signals or close the socket: they only record what happened,
  * and transmit() reports it once the wolfSSL call has returned. */
-class TlsCryptographWolfSSL final : public TlsCryptograph
+class TlsCryptographWolfSSL final : public TlsCryptograph,
+                                    public WolfSSLCallbacks
 {
     Q_DISABLE_COPY_MOVE(TlsCryptographWolfSSL)
 public:
@@ -71,22 +68,24 @@ public:
     void transmit() override;
     bool hasUndecryptedData() const override;
 
-    /* Called from the wolfSSL callbacks (see qtls_wolfssl.cpp). */
-    int ioRecv(char *buf, int size);
-    int ioSend(const char *buf, int size);
-    int verifyCertificate(int preverify, WOLFSSL_X509_STORE_CTX *store);
-    int handleNewSession(WOLFSSL_SESSION *session);
+    /* Called from the wolfSSL callbacks (see qsslcontext_wolfssl.cpp). */
+    int ioRecv(char *buf, int size) override;
+    int ioSend(const char *buf, int size) override;
+    int verifyCertificate(int preverify,
+                          WOLFSSL_X509_STORE_CTX *store) override;
+    int handleNewSession(WOLFSSL_SESSION *session) override;
     unsigned pskClientTlsCallback(const char *hint, char *identity,
                                   unsigned maxIdentityLen, unsigned char *psk,
-                                  unsigned maxPskLen);
+                                  unsigned maxPskLen) override;
     unsigned pskServerTlsCallback(const char *identity, unsigned char *psk,
-                                  unsigned maxPskLen);
+                                  unsigned maxPskLen) override;
     unsigned pskClientTls13Callback(const char *cipherName, char *identity,
                                     unsigned maxIdentityLen,
-                                    unsigned char *psk, unsigned maxPskLen);
+                                    unsigned char *psk,
+                                    unsigned maxPskLen) override;
     unsigned pskServerTls13Callback(const char *identity, unsigned char *psk,
                                     unsigned maxPskLen,
-                                    const char **cipherName);
+                                    const char **cipherName) override;
 
 private:
     /* The state is not derived from isEncrypted() alone, so that TLS 1.2

@@ -33,10 +33,49 @@
 struct WOLFSSL_CTX;
 struct WOLFSSL;
 struct WOLFSSL_SESSION;
+struct WOLFSSL_X509_STORE_CTX;
 
 QT_BEGIN_NAMESPACE
 
 namespace QTlsPrivate {
+
+/* The object that owns a WOLFSSL and answers the callbacks registered on
+ * the shared WOLFSSL_CTX: a TLS socket (TlsCryptographWolfSSL) or a DTLS
+ * connection (qdtls_wolfssl.cpp). It is set as the I/O read and write
+ * context and as the certificate callback context of each WOLFSSL; always
+ * pass a WolfSSLCallbacks pointer there, never a pointer to the derived
+ * class. */
+class WolfSSLCallbacks
+{
+public:
+    virtual ~WolfSSLCallbacks();
+
+    virtual int ioRecv(char *buf, int size) = 0;
+    virtual int ioSend(const char *buf, int size) = 0;
+    virtual int verifyCertificate(int preverify,
+                                  WOLFSSL_X509_STORE_CTX *store) = 0;
+
+    virtual int handleNewSession(WOLFSSL_SESSION *session);
+    virtual unsigned pskClientTlsCallback(const char *hint, char *identity,
+                                          unsigned maxIdentityLen,
+                                          unsigned char *psk,
+                                          unsigned maxPskLen);
+    virtual unsigned pskServerTlsCallback(const char *identity,
+                                          unsigned char *psk,
+                                          unsigned maxPskLen);
+    virtual unsigned pskClientTls13Callback(const char *cipherName,
+                                            char *identity,
+                                            unsigned maxIdentityLen,
+                                            unsigned char *psk,
+                                            unsigned maxPskLen);
+    virtual unsigned pskServerTls13Callback(const char *identity,
+                                            unsigned char *psk,
+                                            unsigned maxPskLen,
+                                            const char **cipherName);
+};
+
+/* QSsl::DtlsV1_0 ... DtlsV1_2OrLater */
+bool isDtlsProtocol(QSsl::SslProtocol protocol);
 
 /* Which PSK callbacks are registered. Decided in one place (pskPolicy()) and
  * used both when the WOLFSSL_CTX is created and when a WOLFSSL object is set

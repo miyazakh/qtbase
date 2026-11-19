@@ -28,6 +28,13 @@ qt_internal_add_plugin(QTlsBackendWolfSSLPlugin
         QT_NO_CAST_FROM_ASCII
 )
 
+qt_internal_extend_target(QTlsBackendWolfSSLPlugin
+    CONDITION QT_FEATURE_wolfssl_dtls
+    SOURCES
+        ../shared/qdtls_base.cpp ../shared/qdtls_base_p.h
+        qdtls_wolfssl.cpp qdtls_wolfssl_p.h
+)
+
 qt_internal_extend_target(QTlsBackendWolfSSLPlugin CONDITION APPLE
     SOURCES
         ../shared/qsslsocket_mac_shared.cpp

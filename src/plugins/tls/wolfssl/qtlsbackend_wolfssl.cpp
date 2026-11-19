@@ -7,6 +7,9 @@
 #include "qtls_wolfssl_p.h"
 #include "qtlskey_wolfssl_p.h"
 #include "qx509_wolfssl_p.h"
+#if QT_CONFIG(wolfssl_dtls)
+#include "qdtls_wolfssl_p.h"
+#endif
 
 #include <QtNetwork/qssl.h>
 #include <QtNetwork/qssldiffiehellmanparameters.h>
@@ -101,8 +104,9 @@ QString QTlsBackendWolfSSL::backendName() const
 QList<QSsl::SslProtocol> QTlsBackendWolfSSL::supportedProtocols() const
 {
     /* TLS 1.2 and TLS 1.3 only; the configure test rejects wolfSSL builds
-     * without either of them. DTLS is not provided by this backend.
-     * TlsV1_0OrLater and TlsV1_1OrLater negotiate TLS 1.2 or later. */
+     * without either of them. TlsV1_0OrLater and TlsV1_1OrLater negotiate
+     * TLS 1.2 or later. DTLS is DTLS 1.2 only; DtlsV1_0OrLater negotiates
+     * DTLS 1.2. */
 QT_WARNING_PUSH
 QT_WARNING_DISABLE_DEPRECATED
     return {
@@ -114,6 +118,11 @@ QT_WARNING_DISABLE_DEPRECATED
         QSsl::TlsV1_2OrLater,
         QSsl::TlsV1_3,
         QSsl::TlsV1_3OrLater,
+#if QT_CONFIG(wolfssl_dtls)
+        QSsl::DtlsV1_0OrLater,
+        QSsl::DtlsV1_2,
+        QSsl::DtlsV1_2OrLater,
+#endif
     };
 QT_WARNING_POP
 }
@@ -148,6 +157,10 @@ QList<QSsl::ImplementedClass> QTlsBackendWolfSSL::implementedClasses() const
         QSsl::ImplementedClass::Socket,
         QSsl::ImplementedClass::DiffieHellman,
         QSsl::ImplementedClass::EllipticCurve,
+#if QT_CONFIG(wolfssl_dtls)
+        QSsl::ImplementedClass::Dtls,
+        QSsl::ImplementedClass::DtlsCookie,
+#endif
     };
 }
 
@@ -221,6 +234,14 @@ void QTlsBackendWolfSSL::ensureInitialized() const
 
     setDefaultSupportedCiphers(ciphers);
     setDefaultCiphers(defaultCiphers);
+#if QT_CONFIG(wolfssl_dtls)
+    /* DTLS 1.2: the same suites without TLS 1.3. */
+    QList<QSslCipher> dtlsCiphers = defaultCiphers;
+    dtlsCiphers.removeIf([](const QSslCipher &cipher) {
+        return cipher.protocol() == QSsl::TlsV1_3;
+    });
+    setDefaultDtlsCiphers(dtlsCiphers);
+#endif
 
     resetDefaultEllipticCurves();
 
@@ -394,6 +415,20 @@ QTlsPrivate::TlsCryptograph *QTlsBackendWolfSSL::createTlsCryptograph() const
 {
     return new QTlsPrivate::TlsCryptographWolfSSL;
 }
+
+#if QT_CONFIG(wolfssl_dtls)
+QTlsPrivate::DtlsCryptograph *QTlsBackendWolfSSL::createDtlsCryptograph(
+        QDtls *q, int mode) const
+{
+    return new QDtlsPrivateWolfSSL(q, QSslSocket::SslMode(mode));
+}
+
+QTlsPrivate::DtlsCookieVerifier *
+QTlsBackendWolfSSL::createDtlsCookieVerifier() const
+{
+    return new QDtlsClientVerifierWolfSSL;
+}
+#endif /* QT_CONFIG(wolfssl_dtls) */
 
 QTlsPrivate::X509Certificate *QTlsBackendWolfSSL::createCertificate() const
 {

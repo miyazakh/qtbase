@@ -65,6 +65,11 @@ private:
     QTlsPrivate::TlsKey *createKey() const override;
     QTlsPrivate::X509Certificate *createCertificate() const override;
     QTlsPrivate::TlsCryptograph *createTlsCryptograph() const override;
+#if QT_CONFIG(wolfssl_dtls)
+    QTlsPrivate::DtlsCryptograph *createDtlsCryptograph(
+            QDtls *q, int mode) const override;
+    QTlsPrivate::DtlsCookieVerifier *createDtlsCookieVerifier() const override;
+#endif
     QTlsPrivate::X509ChainVerifyPtr X509Verifier() const override;
     QTlsPrivate::X509PemReaderPtr X509PemReader() const override;
     QTlsPrivate::X509DerReaderPtr X509DerReader() const override;
