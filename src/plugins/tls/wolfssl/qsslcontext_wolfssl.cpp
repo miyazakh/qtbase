@@ -31,6 +31,80 @@ using namespace Qt::StringLiterals;
 
 namespace QTlsPrivate {
 
+WolfSSLCallbacks::~WolfSSLCallbacks() = default;
+
+int WolfSSLCallbacks::handleNewSession(WOLFSSL_SESSION *session)
+{
+    Q_UNUSED(session);
+    return 0;
+}
+
+unsigned WolfSSLCallbacks::pskClientTlsCallback(const char *hint,
+                                                char *identity,
+                                                unsigned maxIdentityLen,
+                                                unsigned char *psk,
+                                                unsigned maxPskLen)
+{
+    Q_UNUSED(hint);
+    Q_UNUSED(identity);
+    Q_UNUSED(maxIdentityLen);
+    Q_UNUSED(psk);
+    Q_UNUSED(maxPskLen);
+    return 0;
+}
+
+unsigned WolfSSLCallbacks::pskServerTlsCallback(const char *identity,
+                                                unsigned char *psk,
+                                                unsigned maxPskLen)
+{
+    Q_UNUSED(identity);
+    Q_UNUSED(psk);
+    Q_UNUSED(maxPskLen);
+    return 0;
+}
+
+unsigned WolfSSLCallbacks::pskClientTls13Callback(const char *cipherName,
+                                                  char *identity,
+                                                  unsigned maxIdentityLen,
+                                                  unsigned char *psk,
+                                                  unsigned maxPskLen)
+{
+    Q_UNUSED(cipherName);
+    Q_UNUSED(identity);
+    Q_UNUSED(maxIdentityLen);
+    Q_UNUSED(psk);
+    Q_UNUSED(maxPskLen);
+    return 0;
+}
+
+unsigned WolfSSLCallbacks::pskServerTls13Callback(const char *identity,
+                                                  unsigned char *psk,
+                                                  unsigned maxPskLen,
+                                                  const char **cipherName)
+{
+    Q_UNUSED(identity);
+    Q_UNUSED(psk);
+    Q_UNUSED(maxPskLen);
+    Q_UNUSED(cipherName);
+    return 0;
+}
+
+bool isDtlsProtocol(QSsl::SslProtocol protocol)
+{
+    switch (protocol) {
+QT_WARNING_PUSH
+QT_WARNING_DISABLE_DEPRECATED
+    case QSsl::DtlsV1_0:
+    case QSsl::DtlsV1_0OrLater:
+QT_WARNING_POP
+    case QSsl::DtlsV1_2:
+    case QSsl::DtlsV1_2OrLater:
+        return true;
+    default:
+        return false;
+    }
+}
+
 bool tls13ExternalPskRequested()
 {
     /* The same opt-in as the OpenSSL backend: a TLS 1.3 client asks the
@@ -43,9 +117,11 @@ PskPolicy pskPolicy(const QSslConfiguration &configuration,
                     QSslSocket::SslMode mode)
 {
     const QSsl::SslProtocol protocol = configuration.protocol();
+    /* DTLS is DTLS 1.2 only, which uses the TLS 1.2 callbacks. */
     const bool tls12Possible = protocol != QSsl::TlsV1_3
             && protocol != QSsl::TlsV1_3OrLater;
-    const bool tls13Possible = protocol != QSsl::TlsV1_2;
+    const bool tls13Possible = protocol != QSsl::TlsV1_2
+            && !isDtlsProtocol(protocol);
 
     PskPolicy policy;
     if (mode == QSslSocket::SslClientMode) {
@@ -75,15 +151,16 @@ PskPolicy pskPolicy(const QSslConfiguration &configuration,
 
 } /* namespace QTlsPrivate */
 
-using QTlsPrivate::TlsCryptographWolfSSL;
+using QTlsPrivate::WolfSSLCallbacks;
 
 namespace {
 
-TlsCryptographWolfSSL *cryptographFromSsl(WOLFSSL *ssl)
+WolfSSLCallbacks *cryptographFromSsl(WOLFSSL *ssl)
 {
-    /* The I/O read context is the TlsCryptographWolfSSL that owns ssl (see
-     * TlsCryptographWolfSSL::initSsl()); the other callbacks reuse it. */
-    return ssl ? static_cast<TlsCryptographWolfSSL *>(wolfSSL_GetIOReadCtx(ssl))
+    /* The I/O read context is the object that owns ssl (see
+     * TlsCryptographWolfSSL::initSsl() and qdtls_wolfssl.cpp); the other
+     * callbacks reuse it. */
+    return ssl ? static_cast<WolfSSLCallbacks *>(wolfSSL_GetIOReadCtx(ssl))
                : nullptr;
 }
 
@@ -91,7 +168,7 @@ extern "C" {
 
 int q_wolfssl_io_recv(WOLFSSL *, char *buf, int sz, void *ctx)
 {
-    auto *tls = static_cast<TlsCryptographWolfSSL *>(ctx);
+    auto *tls = static_cast<WolfSSLCallbacks *>(ctx);
     if (!tls)
         return WOLFSSL_CBIO_ERR_CONN_CLOSE;
     return tls->ioRecv(buf, sz);
@@ -99,7 +176,7 @@ int q_wolfssl_io_recv(WOLFSSL *, char *buf, int sz, void *ctx)
 
 int q_wolfssl_io_send(WOLFSSL *, char *buf, int sz, void *ctx)
 {
-    auto *tls = static_cast<TlsCryptographWolfSSL *>(ctx);
+    auto *tls = static_cast<WolfSSLCallbacks *>(ctx);
     if (!tls)
         return WOLFSSL_CBIO_ERR_CONN_CLOSE;
     return tls->ioSend(buf, sz);
@@ -108,7 +185,7 @@ int q_wolfssl_io_send(WOLFSSL *, char *buf, int sz, void *ctx)
 int q_wolfssl_verify_callback(int preverify, WOLFSSL_X509_STORE_CTX *store)
 {
     /* userCtx is set with wolfSSL_SetCertCbCtx() for every WOLFSSL object. */
-    auto *tls = store ? static_cast<TlsCryptographWolfSSL *>(store->userCtx)
+    auto *tls = store ? static_cast<WolfSSLCallbacks *>(store->userCtx)
                       : nullptr;
     if (!tls) {
         qCWarning(lcTlsBackendWolfSSL,
@@ -190,29 +267,40 @@ unsigned int q_wolfssl_psk_server_tls13_callback(WOLFSSL *ssl,
 } /* extern "C" */
 
 QByteArray cipherListFromConfiguration(const QSslConfiguration &configuration,
-                                       bool withPsk)
+                                       bool withPsk, bool dtls)
 {
     QList<QSslCipher> ciphers = configuration.ciphers();
-    if (ciphers.isEmpty())
-        ciphers = QTlsBackend::defaultCiphers();
-
-    /* OpenSSL keeps its TLS 1.3 suites (set separately) when the list has
-     * only TLS 1.2 suites, and the other way round. Do the same, so that a
-     * list without TLS 1.3 suites does not disable TLS 1.3. */
     const auto isTls13 = [](const QSslCipher &cipher) {
         return cipher.protocol() == QSsl::TlsV1_3;
     };
-    const bool hasTls13 = std::any_of(ciphers.cbegin(), ciphers.cend(),
-                                      isTls13);
-    const bool hasTls12 = std::any_of(ciphers.cbegin(), ciphers.cend(),
-                                      [&isTls13](const QSslCipher &cipher) {
-                                          return !isTls13(cipher);
-                                      });
-    if (!hasTls13 || !hasTls12) {
-        const auto defaults = QTlsBackend::defaultCiphers();
-        for (const QSslCipher &cipher : defaults) {
-            if (isTls13(cipher) ? !hasTls13 : !hasTls12)
-                ciphers << cipher;
+
+    if (dtls) {
+        /* DTLS 1.2 only: no TLS 1.3 suites. */
+#if QT_CONFIG(dtls)
+        if (ciphers.isEmpty())
+            ciphers = QTlsBackend::defaultDtlsCiphers();
+#endif
+        ciphers.removeIf(isTls13);
+    } else {
+        if (ciphers.isEmpty())
+            ciphers = QTlsBackend::defaultCiphers();
+
+        /* OpenSSL keeps its TLS 1.3 suites (set separately) when the list
+         * has only TLS 1.2 suites, and the other way round. Do the same, so
+         * that a list without TLS 1.3 suites does not disable TLS 1.3. */
+        const bool hasTls13 = std::any_of(ciphers.cbegin(), ciphers.cend(),
+                                          isTls13);
+        const bool hasTls12 = std::any_of(
+                ciphers.cbegin(), ciphers.cend(),
+                [&isTls13](const QSslCipher &cipher) {
+                    return !isTls13(cipher);
+                });
+        if (!hasTls13 || !hasTls12) {
+            const auto defaults = QTlsBackend::defaultCiphers();
+            for (const QSslCipher &cipher : defaults) {
+                if (isTls13(cipher) ? !hasTls13 : !hasTls12)
+                    ciphers << cipher;
+            }
         }
     }
 
@@ -298,6 +386,19 @@ QT_WARNING_POP
         method = client ? wolfTLS_client_method() : wolfTLS_server_method();
         needsMinimumTls12 = true;
         break;
+#if QT_CONFIG(wolfssl_dtls)
+    /* DTLS 1.2 only: no QSsl::DtlsV1_3 exists, and DTLS 1.0 is not offered,
+     * so "1.0 or later" negotiates DTLS 1.2. */
+    case QSsl::DtlsV1_2:
+    case QSsl::DtlsV1_2OrLater:
+QT_WARNING_PUSH
+QT_WARNING_DISABLE_DEPRECATED
+    case QSsl::DtlsV1_0OrLater:
+QT_WARNING_POP
+        method = client ? wolfDTLSv1_2_client_method()
+                        : wolfDTLSv1_2_server_method();
+        break;
+#endif
     default:
         break;
     }
@@ -338,8 +439,9 @@ QT_WARNING_POP
 #else
     const bool withPsk = false;
 #endif
-    const QByteArray cipherList
-            = cipherListFromConfiguration(configuration, withPsk);
+    const QByteArray cipherList = cipherListFromConfiguration(
+            configuration, withPsk,
+            QTlsPrivate::isDtlsProtocol(configuration.protocol()));
     if (cipherList.isEmpty()
         || wolfSSL_CTX_set_cipher_list(ctx, cipherList.constData())
                 != WOLFSSL_SUCCESS) {
