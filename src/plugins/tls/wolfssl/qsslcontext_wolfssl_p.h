@@ -44,9 +44,15 @@ namespace QTlsPrivate {
  * up. See docs/design-io-bridge.md, chapter 11. */
 struct PskPolicy
 {
-    bool clientTls12 = false; /* client: wolfSSL_CTX_set_psk_client_callback */
-    bool serverTls12 = false; /* server: wolfSSL_CTX_set_psk_server_callback */
-    bool tls13 = false; /* *_tls13 callbacks (external TLS 1.3 PSK, not yet) */
+    bool clientTls12 = false; /* wolfSSL_CTX_set_psk_client_callback */
+    bool clientTls13 = false; /* wolfSSL_CTX_set_psk_client_cs_callback */
+    bool serverTls12 = false; /* wolfSSL_CTX_set_psk_server_callback */
+    bool serverTls13 = false; /* wolfSSL_CTX_set_psk_server_tls13_callback */
+
+    bool any() const
+    {
+        return clientTls12 || clientTls13 || serverTls12 || serverTls13;
+    }
 };
 
 PskPolicy pskPolicy(const QSslConfiguration &configuration,
@@ -94,6 +100,14 @@ public:
 
     QSslSocket::SslMode mode() const { return m_mode; }
 
+    /* The TLS 1.3 suite an external PSK is bound to, or nullptr if the
+     * cipher list has none that fits (see init()). */
+    const char *tls13PskCipher() const
+    {
+        return m_tls13PskCipher.isEmpty() ? nullptr
+                                          : m_tls13PskCipher.constData();
+    }
+
 private:
     QSslContext() = default;
 
@@ -104,6 +118,7 @@ private:
     WOLFSSL_CTX *ctx = nullptr;
     WOLFSSL_SESSION *session = nullptr;
     QByteArray m_sessionASN1;
+    QByteArray m_tls13PskCipher;
     int m_sessionTicketLifeTimeHint = -1;
     QSslError::SslError errorCode = QSslError::NoError;
     QString errorStr;
