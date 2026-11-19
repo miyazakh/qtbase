@@ -527,8 +527,12 @@ void tst_QDtls::cipherPreferences()
     // This test is based on the similar case in tst_QSslSocket. We test it for QDtls
     // because it's possible to set ciphers and corresponding ('server preferred')
     // options via QSslConfiguration.
-    const QSslCipher aes128(QStringLiteral("AES128-SHA"));
-    const QSslCipher aes256(QStringLiteral("AES256-SHA"));
+    // wolfSSL has no static RSA suites by default.
+    const bool wolfSsl = QSslSocket::activeBackend() == QStringLiteral("wolfssl");
+    const QSslCipher aes128(wolfSsl ? QStringLiteral("ECDHE-RSA-AES128-SHA")
+                                    : QStringLiteral("AES128-SHA"));
+    const QSslCipher aes256(wolfSsl ? QStringLiteral("ECDHE-RSA-AES256-SHA")
+                                    : QStringLiteral("AES256-SHA"));
 
     auto serverConfig = defaultServerConfig;
     const QList<QSslCipher> ciphers = serverConfig.ciphers();
@@ -581,8 +585,12 @@ void tst_QDtls::protocolVersionMatching_data()
     //OPENSSL_VERSION_NUMBER :
     //(OPENSSL_VERSION_MAJOR<<28) | (OPENSSL_VERSION_MINOR<<20) | (OPENSSL_VERSION_PATCH<<4)
     const long ossl311 = 0x30100010;
+    /* The wolfSSL backend offers DTLS 1.2 only, and its version numbers
+     * are not OpenSSL's. */
+    const bool withDtls10 = QSslSocket::activeBackend() != QStringLiteral("wolfssl")
+            && QSslSocket::sslLibraryVersionNumber() < ossl311;
 
-    if (QSslSocket::sslLibraryVersionNumber() < ossl311) {
+    if (withDtls10) {
 #if QT_DEPRECATED_SINCE(6, 3)
 QT_WARNING_PUSH QT_WARNING_DISABLE_DEPRECATED
         QTest::addRow("DtlsV1_0 <-> DtlsV1_0") << QSsl::DtlsV1_0 << QSsl::DtlsV1_0 << true;
@@ -598,7 +606,7 @@ QT_WARNING_POP
     QTest::addRow("DtlsV1_2 <-> DtlsV1_2OrLater") << QSsl::DtlsV1_2 << QSsl::DtlsV1_2OrLater << true;
     QTest::addRow("DtlsV1_2OrLater <-> DtlsV1_2OrLater") << QSsl::DtlsV1_2OrLater << QSsl::DtlsV1_2OrLater << true;
 
-    if (QSslSocket::sslLibraryVersionNumber() < ossl311) {
+    if (withDtls10) {
 #if QT_DEPRECATED_SINCE(6, 3)
 QT_WARNING_PUSH QT_WARNING_DISABLE_DEPRECATED
         QTest::addRow("DtlsV1_0 <-> DtlsV1_2") << QSsl::DtlsV1_0 << QSsl::DtlsV1_2 << false;
@@ -890,7 +898,11 @@ void tst_QDtls::verifyClientCertificate_data()
         QTest::newRow("valid-server-cert : AutoVerifyPeer") << QSslSocket::AutoVerifyPeer << chain << key << true;
         QTest::newRow("valid-server-cert : QueryPeer") << QSslSocket::QueryPeer << chain << key << true;
         QTest::newRow("valid-server-cert : VerifyNone") << QSslSocket::VerifyNone << chain << key << true;
-        QTest::newRow("valid-server-cert : VerifyPeer") << QSslSocket::VerifyPeer << chain << key << false;
+        /* wolfSSL ignores the obsolete Netscape Cert Type extension ("SSL
+         * Server" only), which makes OpenSSL refuse this as a client
+         * certificate. */
+        const bool wolfSsl = QSslSocket::activeBackend() == QStringLiteral("wolfssl");
+        QTest::newRow("valid-server-cert : VerifyPeer") << QSslSocket::VerifyPeer << chain << key << wolfSsl;
     }
     {
         // Valid certificate, correct usage (client certificate):
