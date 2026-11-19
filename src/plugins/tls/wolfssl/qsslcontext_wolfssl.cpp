@@ -33,31 +33,43 @@ namespace QTlsPrivate {
 
 bool tls13ExternalPskRequested()
 {
-    /* TLS 1.3 external PSK is not implemented yet (docs/design-io-bridge.md
-     * 11.5). Once it is, this returns
-     * qEnvironmentVariableIsSet("QT_USE_TLS_1_3_PSK"), the same opt-in as the
-     * OpenSSL backend. */
-    return false;
+    /* The same opt-in as the OpenSSL backend: a TLS 1.3 client asks the
+     * application for an external PSK only when this is set, since it has
+     * to do so before it knows whether the server wants one. */
+    return qEnvironmentVariableIsSet("QT_USE_TLS_1_3_PSK");
 }
 
 PskPolicy pskPolicy(const QSslConfiguration &configuration,
                     QSslSocket::SslMode mode)
 {
+    const QSsl::SslProtocol protocol = configuration.protocol();
+    const bool tls12Possible = protocol != QSsl::TlsV1_3
+            && protocol != QSsl::TlsV1_3OrLater;
+    const bool tls13Possible = protocol != QSsl::TlsV1_2;
+
     PskPolicy policy;
     if (mode == QSslSocket::SslClientMode) {
-        /* wolfSSL calls a registered client PSK callback while building every
-         * TLS 1.3 ClientHello, and treats a zero-length key as a PSK rather
-         * than "no PSK" (docs/design-io-bridge.md 11.3). Register it only when
-         * TLS 1.3 cannot be negotiated, so that
-         * preSharedKeyAuthenticationRequired is not emitted for every TLS 1.3
-         * connection. */
-        policy.clientTls12 = configuration.protocol() == QSsl::TlsV1_2;
+#ifndef WOLFSSL_PSK_ONE_ID
+        /* wolfSSL calls a client PSK callback while it builds every TLS 1.3
+         * ClientHello. With the cipher suite callback registered, it calls
+         * that one there instead (once per TLS 1.3 suite) and takes a key
+         * length of 0 as "no PSK"; the TLS 1.2 callback is then only called
+         * once the server has chosen a TLS 1.2 PSK suite
+         * (docs/design-io-bridge.md 11.3, 11.4). */
+        policy.clientTls12 = tls12Possible;
+        policy.clientTls13 = tls13Possible;
+#else
+        /* wolfSSL: with WOLFSSL_PSK_ONE_ID the TLS 1.2 callback is called
+         * for the TLS 1.3 ClientHello and cannot answer "no PSK". Register
+         * it only when TLS 1.3 cannot be negotiated. */
+        policy.clientTls12 = !tls13Possible;
+#endif
     } else if (mode == QSslSocket::SslServerMode) {
-        /* The server callback checks the negotiated version itself and does
-         * not ask the application during a TLS 1.3 handshake. */
-        policy.serverTls12 = true;
+        /* Like the OpenSSL backend, a server always answers PSK identities,
+         * TLS 1.2 and TLS 1.3 alike. */
+        policy.serverTls12 = tls12Possible;
+        policy.serverTls13 = tls13Possible;
     }
-    policy.tls13 = tls13ExternalPskRequested();
     return policy;
 }
 
@@ -133,13 +145,44 @@ unsigned int q_wolfssl_psk_server_callback(WOLFSSL *ssl, const char *identity,
                                            unsigned int maxKeyLen)
 {
     /* wolfSSL falls back to this (TLS 1.2) callback during a TLS 1.3
-     * handshake when no TLS 1.3 callback is registered
-     * (docs/design-io-bridge.md 11.3, 11.4). External TLS 1.3 PSK is not
-     * supported yet, so do not ask the application in that case. */
+     * handshake when the TLS 1.3 callback finds no key
+     * (docs/design-io-bridge.md 11.3). The application has already been
+     * asked by then. */
     if (wolfSSL_GetVersion(ssl) == WOLFSSL_TLSV1_3)
         return 0;
     if (auto *tls = cryptographFromSsl(ssl))
         return tls->pskServerTlsCallback(identity, key, maxKeyLen);
+    return 0;
+}
+
+#ifndef WOLFSSL_PSK_ONE_ID
+unsigned int q_wolfssl_psk_client_cs_callback(WOLFSSL *ssl, const char *hint,
+                                              char *identity,
+                                              unsigned int maxIdentityLen,
+                                              unsigned char *key,
+                                              unsigned int maxKeyLen,
+                                              const char *cipherName)
+{
+    /* TLS 1.3 has no identity hint. */
+    Q_UNUSED(hint);
+    if (auto *tls = cryptographFromSsl(ssl)) {
+        return tls->pskClientTls13Callback(cipherName, identity,
+                                           maxIdentityLen, key, maxKeyLen);
+    }
+    return 0;
+}
+#endif
+
+unsigned int q_wolfssl_psk_server_tls13_callback(WOLFSSL *ssl,
+                                                 const char *identity,
+                                                 unsigned char *key,
+                                                 unsigned int maxKeyLen,
+                                                 const char **cipherName)
+{
+    if (auto *tls = cryptographFromSsl(ssl)) {
+        return tls->pskServerTls13Callback(identity, key, maxKeyLen,
+                                           cipherName);
+    }
     return 0;
 }
 #endif /* !NO_PSK */
@@ -291,7 +334,7 @@ QT_WARNING_POP
 #ifndef NO_PSK
     const QTlsPrivate::PskPolicy psk
             = QTlsPrivate::pskPolicy(configuration, mode);
-    const bool withPsk = psk.clientTls12 || psk.serverTls12 || psk.tls13;
+    const bool withPsk = psk.any();
 #else
     const bool withPsk = false;
 #endif
@@ -450,18 +493,42 @@ QT_WARNING_POP
         }
     }
 
-    /* PSK (TLS 1.2 external PSK; TLS 1.3 resumption does not use these) */
+    /* External PSK (TLS 1.3 resumption does not use these callbacks) */
 #ifndef NO_PSK
     if (psk.clientTls12)
         wolfSSL_CTX_set_psk_client_callback(ctx, q_wolfssl_psk_client_callback);
+#ifndef WOLFSSL_PSK_ONE_ID
+    if (psk.clientTls13) {
+        wolfSSL_CTX_set_psk_client_cs_callback(
+                ctx, q_wolfssl_psk_client_cs_callback);
+    }
+#endif
     if (psk.serverTls12) {
         wolfSSL_CTX_set_psk_server_callback(ctx, q_wolfssl_psk_server_callback);
         const QByteArray hint = configuration.preSharedKeyIdentityHint();
         if (!hint.isEmpty())
             wolfSSL_CTX_use_psk_identity_hint(ctx, hint.constData());
     }
-    /* TLSTODO: register the *_tls13 callbacks when psk.tls13 is set
-     * (docs/design-io-bridge.md 11.5). */
+    if (psk.serverTls13) {
+        wolfSSL_CTX_set_psk_server_tls13_callback(
+                ctx, q_wolfssl_psk_server_tls13_callback);
+    }
+
+    /* A TLS 1.3 external PSK is bound to a hash. As OpenSSL does for the
+     * PSK callbacks of QSslSocket, use SHA-256: the first SHA-256 suite of
+     * the cipher list. The server only accepts the PSK with exactly this
+     * suite; the client accepts any suite with the same hash. */
+    if (psk.clientTls13 || psk.serverTls13) {
+        const auto names = cipherList.split(':');
+        for (const QByteArray &name : names) {
+            if (name.startsWith("TLS13-") && name.endsWith("-SHA256")) {
+                m_tls13PskCipher = name;
+                break;
+            }
+        }
+        qCDebug(lcTlsBackendWolfSSL) << "TLS 1.3 external PSK cipher suite:"
+                                     << m_tls13PskCipher;
+    }
 #endif /* !NO_PSK */
 
     /* Elliptic curves, in the order of preference given. wolfSSL takes the

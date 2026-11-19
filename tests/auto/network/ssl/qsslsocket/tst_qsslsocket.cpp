@@ -256,6 +256,8 @@ private slots:
     void ephemeralServerKey_data();
     void ephemeralServerKey();
     void pskServer();
+    void pskServerTls13_data();
+    void pskServerTls13();
     void forwardReadChannelFinished();
     void signatureAlgorithm_data();
     void signatureAlgorithm();
@@ -4155,6 +4157,7 @@ public:
     bool m_server;
     QByteArray m_identity;
     QByteArray m_psk;
+    int m_requests = 0;
 
     explicit PskProvider(QObject *parent = nullptr)
         : QObject(parent), m_server(false)
@@ -4174,6 +4177,7 @@ public:
 public slots:
     void providePsk(QSslPreSharedKeyAuthenticator *authenticator)
     {
+        ++m_requests;
         QVERIFY(authenticator);
         QCOMPARE(authenticator->identityHint(), PSK_SERVER_IDENTITY_HINT);
         if (m_server)
@@ -4573,9 +4577,6 @@ void tst_QSslSocket::pskServer()
 
     QSslSocket socket;
     this->socket = &socket;
-    /* wolfSSL: a client offers external PSK only when TLS 1.3 is off. */
-    if (isTestingWolfSsl)
-        socket.setProtocol(QSsl::TlsV1_2);
 
     QSignalSpy connectedSpy(&socket, SIGNAL(connected()));
     QVERIFY(connectedSpy.isValid());
@@ -4652,6 +4653,94 @@ void tst_QSslSocket::pskServer()
 
     QCOMPARE(socket.state(), QAbstractSocket::UnconnectedState);
     QCOMPARE(disconnectedSpy.size(), 1);
+}
+
+void tst_QSslSocket::pskServerTls13_data()
+{
+    QTest::addColumn<bool>("optIn");
+    QTest::addColumn<bool>("rightKey");
+
+    QTest::newRow("QT_USE_TLS_1_3_PSK, right key") << true << true;
+    QTest::newRow("QT_USE_TLS_1_3_PSK, wrong key") << true << false;
+    QTest::newRow("no QT_USE_TLS_1_3_PSK") << false << true;
+}
+
+void tst_QSslSocket::pskServerTls13()
+{
+    /* External PSK with TLS 1.3 on both sides. The server has no
+     * certificate, so the handshake only succeeds with the PSK. A client
+     * offers one only if QT_USE_TLS_1_3_PSK is set. */
+    if (!isTestingOpenSsl && !isTestingWolfSsl)
+        QSKIP("The active TLS-backend does not have PSK support implemented.");
+    if (!QSslSocket::isProtocolSupported(QSsl::TlsV1_3))
+        QSKIP("TLS 1.3 is not supported");
+
+    QFETCH_GLOBAL(bool, setProxy);
+    if (!QSslSocket::supportsSsl() || setProxy)
+        return;
+
+    QFETCH(bool, optIn);
+    QFETCH(bool, rightKey);
+
+    const char envName[] = "QT_USE_TLS_1_3_PSK";
+    const bool envWasSet = qEnvironmentVariableIsSet(envName);
+    const QByteArray envValue = qgetenv(envName);
+    if (optIn)
+        qputenv(envName, "1");
+    else
+        qunsetenv(envName);
+    const auto envGuard = qScopeGuard([&] {
+        if (envWasSet)
+            qputenv(envName, envValue);
+        else
+            qunsetenv(envName);
+    });
+
+    PskServer server;
+    server.protocol = QSsl::TlsV1_3;
+    server.peerVerifyMode = QSslSocket::VerifyNone;
+    server.m_pskProvider.setPreSharedKey(PSK_CLIENT_PRESHAREDKEY);
+    server.config.setPreSharedKeyIdentityHint(PSK_SERVER_IDENTITY_HINT);
+    QVERIFY(server.listen(QHostAddress::LocalHost));
+
+    QSslSocket socket;
+    socket.setProtocol(QSsl::TlsV1_3);
+    socket.setPeerVerifyMode(QSslSocket::VerifyNone);
+    int clientPskRequests = 0;
+    connect(&socket, &QSslSocket::preSharedKeyAuthenticationRequired, this,
+            [&](QSslPreSharedKeyAuthenticator *authenticator) {
+                ++clientPskRequests;
+                /* TLS 1.3 has no identity hint. */
+                QVERIFY(authenticator->identityHint().isEmpty());
+                QVERIFY(authenticator->maximumIdentityLength() > 0);
+                authenticator->setIdentity(PSK_CLIENT_IDENTITY);
+                authenticator->setPreSharedKey(
+                        rightKey ? PSK_CLIENT_PRESHAREDKEY
+                                 : PSK_CLIENT_PRESHAREDKEY.left(
+                                           PSK_CLIENT_PRESHAREDKEY.size()
+                                           - 1));
+            });
+    QSignalSpy encryptedSpy(&socket, &QSslSocket::encrypted);
+    QSignalSpy errorSpy(&socket, &QSslSocket::errorOccurred);
+
+    socket.connectToHostEncrypted(QHostAddress(QHostAddress::LocalHost)
+                                          .toString(),
+                                  server.serverPort());
+
+    const bool expectEncrypted = optIn && rightKey;
+    if (expectEncrypted) {
+        QTRY_COMPARE(encryptedSpy.size(), 1);
+        QCOMPARE(socket.sessionProtocol(), QSsl::TlsV1_3);
+        QVERIFY(server.socket);
+        QTRY_VERIFY(server.socket->isEncrypted());
+        QCOMPARE(server.socket->sessionProtocol(), QSsl::TlsV1_3);
+        QCOMPARE(server.m_pskProvider.m_requests, 1);
+    } else {
+        QTRY_VERIFY(!errorSpy.isEmpty());
+        QCOMPARE(encryptedSpy.size(), 0);
+        QCOMPARE(server.m_pskProvider.m_requests, optIn ? 1 : 0);
+    }
+    QCOMPARE(clientPskRequests, optIn ? 1 : 0);
 }
 
 void tst_QSslSocket::signatureAlgorithm_data()
