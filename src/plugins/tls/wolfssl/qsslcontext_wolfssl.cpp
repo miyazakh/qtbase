@@ -347,6 +347,14 @@ QT_WARNING_POP
         return;
     }
 
+    /* wolfSSL picks the server's preferred suite by default, as Qt does
+     * unless asked otherwise. */
+    if (!client
+        && configuration.testSslOption(
+                QSsl::SslOptionDisableServerCipherPreference)) {
+        wolfSSL_CTX_UseClientSuites(ctx);
+    }
+
     /* CA certificates for peer verification. Expired certificates are left
      * out, as in the OpenSSL backend. */
     const QDateTime now = QDateTime::currentDateTimeUtc();
