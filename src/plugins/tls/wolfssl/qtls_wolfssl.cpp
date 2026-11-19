@@ -175,9 +175,10 @@ bool TlsCryptographWolfSSL::initSsl()
     /* Per-connection context for the I/O bridge and the verify callback
      * (docs/design-io-bridge.md 3.1). The other callbacks find this object
      * through wolfSSL_GetIOReadCtx(). */
-    wolfSSL_SetIOReadCtx(ssl, this);
-    wolfSSL_SetIOWriteCtx(ssl, this);
-    wolfSSL_SetCertCbCtx(ssl, this);
+    WolfSSLCallbacks *callbacks = this;
+    wolfSSL_SetIOReadCtx(ssl, callbacks);
+    wolfSSL_SetIOWriteCtx(ssl, callbacks);
+    wolfSSL_SetCertCbCtx(ssl, callbacks);
 
     const bool tls12Possible = configuration.protocol() != QSsl::TlsV1_3
             && configuration.protocol() != QSsl::TlsV1_3OrLater;
