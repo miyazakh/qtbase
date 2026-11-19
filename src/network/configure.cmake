@@ -184,6 +184,36 @@ int main(void)
 }
 ")
 
+# wolfssl_dtls
+qt_config_compile_test(wolfssl_dtls
+    LABEL "DTLS support in wolfSSL"
+    LIBRARIES
+        WrapWolfSSL::WrapWolfSSL
+    CODE
+"#include <wolfssl/options.h>
+#include <wolfssl/ssl.h>
+#if !defined(WOLFSSL_DTLS) || !defined(WOLFSSL_DTLS_MTU)
+#  error wolfSSL without DTLS (--enable-dtls --enable-dtls-mtu)
+#endif
+
+int main(void)
+{
+    /* BEGIN TEST: */
+WOLFSSL_CTX *ctx = wolfSSL_CTX_new(wolfDTLSv1_2_server_method());
+WOLFSSL *ssl = wolfSSL_new(ctx);
+wolfSSL_dtls_set_using_nonblock(ssl, 1);
+wolfSSL_dtls_set_mtu(ssl, 1400);
+wolfSSL_DTLS_SetCookieSecret(ssl, nullptr, 0);
+wolfDTLS_accept_stateless(ssl);
+wolfDTLS_SetChGoodCb(ssl, nullptr, nullptr);
+wolfSSL_dtls_got_timeout(ssl);
+wolfSSL_free(ssl);
+wolfSSL_CTX_free(ctx);
+    /* END TEST: */
+    return 0;
+}
+")
+
 # ocsp
 qt_config_compile_test(ocsp
     LABEL "OCSP stapling support in OpenSSL"
@@ -284,11 +314,16 @@ qt_feature("ssl" PUBLIC
         OR QT_FEATURE_wolfssl
 )
 qt_feature_definition("ssl" "QT_NO_SSL" NEGATE VALUE "1")
+qt_feature("wolfssl_dtls" PRIVATE
+    LABEL "DTLS with wolfSSL"
+    CONDITION QT_FEATURE_wolfssl AND QT_FEATURE_udpsocket AND TEST_wolfssl_dtls
+)
 qt_feature("dtls" PUBLIC
     SECTION "Networking"
     LABEL "DTLS"
     PURPOSE "Provides a DTLS implementation"
-    CONDITION QT_FEATURE_openssl AND QT_FEATURE_udpsocket AND TEST_dtls
+    CONDITION QT_FEATURE_udpsocket
+        AND ((QT_FEATURE_openssl AND TEST_dtls) OR QT_FEATURE_wolfssl_dtls)
 )
 qt_feature("ocsp" PUBLIC
     SECTION "Networking"
