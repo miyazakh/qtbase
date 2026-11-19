@@ -81,6 +81,12 @@ public:
                                   unsigned maxPskLen);
     unsigned pskServerTlsCallback(const char *identity, unsigned char *psk,
                                   unsigned maxPskLen);
+    unsigned pskClientTls13Callback(const char *cipherName, char *identity,
+                                    unsigned maxIdentityLen,
+                                    unsigned char *psk, unsigned maxPskLen);
+    unsigned pskServerTls13Callback(const char *identity, unsigned char *psk,
+                                    unsigned maxPskLen,
+                                    const char **cipherName);
 
 private:
     /* The state is not derived from isEncrypted() alone, so that TLS 1.2
@@ -143,6 +149,18 @@ private:
     bool pendingSocketError = false;
 
     bool pendingNewSessionTicket = false;
+
+    /* TLS 1.3 external PSK. wolfSSL calls the callbacks several times per
+     * handshake (once per cipher suite, again for the binder); the
+     * application is asked once and the answer is kept here. */
+    struct Tls13Psk
+    {
+        bool asked = false;
+        QByteArray identity;
+        QByteArray key;
+    };
+    Tls13Psk tls13Psk;
+
     /* Size of the decrypted-data buffer while wolfSSL_read() runs, see
      * readThrottled(). */
     qint64 bufferedBeforeRead = -1;

@@ -81,6 +81,7 @@ void TlsCryptographWolfSSL::reset()
     ioClosed = false;
     pendingSocketError = false;
     pendingNewSessionTicket = false;
+    tls13Psk = {};
     drainingOnDisconnect = false;
     shutdown = false;
     closeNotifyReceived = false;
@@ -423,6 +424,85 @@ unsigned TlsCryptographWolfSSL::pskServerTlsCallback(const char *identity,
                                authenticator.maximumPreSharedKeyLength());
     std::memcpy(psk, authenticator.preSharedKey().constData(), pskLength);
     return pskLength;
+}
+
+unsigned TlsCryptographWolfSSL::pskClientTls13Callback(const char *cipherName,
+                                                       char *identity,
+                                                       unsigned maxIdentityLen,
+                                                       unsigned char *psk,
+                                                       unsigned maxPskLen)
+{
+    Q_ASSERT(q);
+
+    /* Called while the TLS 1.3 ClientHello is built, once for each TLS 1.3
+     * suite, and again when the binder is computed. Returning 0 offers no
+     * PSK for that suite; the handshake goes on with certificates. Without
+     * the opt-in the application is not asked, as in the OpenSSL backend. */
+    if (!tls13ExternalPskRequested() || !sslContextPointer || !cipherName)
+        return 0;
+    const char *pskCipher = sslContextPointer->tls13PskCipher();
+    if (!pskCipher || std::strcmp(cipherName, pskCipher) != 0)
+        return 0;
+
+    if (!tls13Psk.asked) {
+        tls13Psk.asked = true;
+        QSslPreSharedKeyAuthenticator authenticator;
+        QTlsBackend::setupClientPskAuth(&authenticator, nullptr, 0,
+                                        maxIdentityLen, maxPskLen);
+        emit q->preSharedKeyAuthenticationRequired(&authenticator);
+        if (!authenticator.preSharedKey().isEmpty()) {
+            tls13Psk.identity = authenticator.identity().left(
+                    authenticator.maximumIdentityLength());
+            tls13Psk.key = authenticator.preSharedKey().left(
+                    authenticator.maximumPreSharedKeyLength());
+        }
+    }
+
+    /* No PSK set? Return 0: the server authenticates with a certificate. */
+    if (tls13Psk.key.isEmpty())
+        return 0;
+
+    std::memcpy(identity, tls13Psk.identity.constData(),
+                tls13Psk.identity.size());
+    identity[tls13Psk.identity.size()] = 0;
+    std::memcpy(psk, tls13Psk.key.constData(), tls13Psk.key.size());
+    return unsigned(tls13Psk.key.size());
+}
+
+unsigned TlsCryptographWolfSSL::pskServerTls13Callback(const char *identity,
+                                                       unsigned char *psk,
+                                                       unsigned maxPskLen,
+                                                       const char **cipherName)
+{
+    Q_ASSERT(q);
+
+    /* Called for each identity the client offers, once for each suite the
+     * two sides share. Ask the application once per identity. */
+    const char *pskCipher
+            = sslContextPointer ? sslContextPointer->tls13PskCipher() : nullptr;
+    if (!pskCipher || !identity)
+        return 0;
+
+    const QByteArray offered(identity);
+    if (!tls13Psk.asked || tls13Psk.identity != offered) {
+        tls13Psk.asked = true;
+        tls13Psk.identity = offered;
+        tls13Psk.key.clear();
+        QSslPreSharedKeyAuthenticator authenticator;
+        QTlsBackend::setupServerPskAuth(
+                &authenticator, identity,
+                q->sslConfiguration().preSharedKeyIdentityHint(), maxPskLen);
+        emit q->preSharedKeyAuthenticationRequired(&authenticator);
+        tls13Psk.key = authenticator.preSharedKey().left(
+                authenticator.maximumPreSharedKeyLength());
+    }
+
+    if (tls13Psk.key.isEmpty())
+        return 0;
+
+    *cipherName = pskCipher;
+    std::memcpy(psk, tls13Psk.key.constData(), tls13Psk.key.size());
+    return unsigned(tls13Psk.key.size());
 }
 
 void TlsCryptographWolfSSL::transmit()
