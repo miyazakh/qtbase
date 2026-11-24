@@ -30,6 +30,7 @@ QT_REQUIRE_CONFIG(wolfssl_dtls);
 #include <QtNetwork/qhostaddress.h>
 #include <QtNetwork/qsslpresharedkeyauthenticator.h>
 
+#include <QtCore/qbitarray.h>
 #include <QtCore/qbytearray.h>
 #include <QtCore/qlist.h>
 #include <QtCore/qobject.h>
@@ -42,6 +43,35 @@ class QDtlsPrivateWolfSSL;
 class QUdpSocket;
 
 namespace dtlswolfssl {
+
+/* wolfSSL ignores a fragmented DTLS 1.2 ClientHello: a server that has
+ * not verified the client yet keeps no state for it. OpenSSL clients that
+ * cannot query the path MTU (on macOS, for example) fragment theirs for a
+ * 256-byte link, though, as do clients with a small MTU hint. The
+ * assembler collects the fragments of one ClientHello at a time and gives
+ * the whole message to wolfSSL as one record. */
+class ClientHelloAssembler
+{
+public:
+    enum Result {
+        NotFragmented, /* not a ClientHello fragment: use the datagram */
+        Incomplete,    /* fragment stored, more to come */
+        Complete       /* *hello is the reassembled datagram */
+    };
+
+    Result add(const QByteArray &dgram, const QHostAddress &address,
+               quint16 port, QByteArray *hello);
+    void clear();
+
+private:
+    QHostAddress peerAddress;
+    quint16 peerPort = 0;
+    quint16 messageSeq = 0;
+    QByteArray recordHeader;
+    QByteArray body;
+    QBitArray received;
+    qsizetype missing = 0;
+};
 
 /* One WOLFSSL object and the datagram I/O bridge around it, shared by
  * QDtls and QDtlsClientVerifier (like DtlsState in the OpenSSL backend).
@@ -131,6 +161,7 @@ public:
 
 private:
     dtlswolfssl::DtlsState dtls;
+    dtlswolfssl::ClientHelloAssembler helloAssembler;
     QByteArray verifiedClientHello;
 };
 
@@ -196,6 +227,8 @@ private:
     void resetDtls();
 
     dtlswolfssl::DtlsState dtls;
+    /* Server: a fragmented ClientHello (see ClientHelloAssembler). */
+    dtlswolfssl::ClientHelloAssembler helloAssembler;
 
     /* QUdpSocket is non-blocking and wolfSSL does not know when a
      * retransmission is due; the timer tells the application
