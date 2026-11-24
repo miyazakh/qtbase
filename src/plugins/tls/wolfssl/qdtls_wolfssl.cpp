@@ -39,6 +39,29 @@ constexpr quint16 defaultMtu = 576;
  * otherwise refuse to send, and to receive, records larger than the MTU. */
 constexpr quint16 maxRecordMtu = 16384;
 
+/* DTLS record and handshake message headers (RFC 6347, 4.1 and 4.2.2). */
+constexpr qsizetype recordHeaderSize = 13;
+constexpr qsizetype handshakeHeaderSize = 12;
+constexpr uchar handshakeRecord = 22;
+constexpr uchar clientHelloMessage = 1;
+
+/* A ClientHello larger than this is not reassembled. */
+constexpr quint32 maxClientHelloSize = maxRecordMtu - handshakeHeaderSize;
+
+quint32 readUint(const uchar *p, int size)
+{
+    quint32 value = 0;
+    for (int i = 0; i < size; ++i)
+        value = (value << 8) | p[i];
+    return value;
+}
+
+void appendUint(QByteArray *data, quint32 value, int size)
+{
+    for (int i = size - 1; i >= 0; --i)
+        data->append(char((value >> (8 * i)) & 0xff));
+}
+
 /* The default cookie secret: one random value per process, so that a
  * QDtlsClientVerifier and a server-side QDtls agree without the
  * application having to set GeneratorParameters (as in the OpenSSL
@@ -354,6 +377,100 @@ unsigned DtlsState::pskServerTlsCallback(const char *identity,
     return dtlsPrivate->pskServerCallback(identity, psk, maxPskLen);
 }
 
+ClientHelloAssembler::Result ClientHelloAssembler::add(
+        const QByteArray &dgram, const QHostAddress &address, quint16 port,
+        QByteArray *hello)
+{
+    Q_ASSERT(hello);
+
+    /* Collect the fragments first: if any record in the datagram is
+     * something else, the datagram goes to wolfSSL unchanged. */
+    struct Fragment
+    {
+        const uchar *record;
+        quint32 length;
+        quint16 seq;
+        quint32 offset;
+        quint32 size;
+    };
+    QList<Fragment> fragments;
+    const auto *data = reinterpret_cast<const uchar *>(dgram.constData());
+    qsizetype pos = 0;
+    while (pos < dgram.size()) {
+        if (dgram.size() - pos < recordHeaderSize + handshakeHeaderSize)
+            return NotFragmented;
+        const uchar *record = data + pos;
+        const quint32 recordSize = readUint(record + 11, 2);
+        const uchar *msg = record + recordHeaderSize;
+        if (record[0] != handshakeRecord || readUint(record + 3, 2) != 0
+            || recordSize > quint32(dgram.size() - pos - recordHeaderSize)
+            || msg[0] != clientHelloMessage) {
+            return NotFragmented;
+        }
+        Fragment f{record, readUint(msg + 1, 3), quint16(readUint(msg + 4, 2)),
+                   readUint(msg + 6, 3), readUint(msg + 9, 3)};
+        if (recordSize != handshakeHeaderSize + f.size
+            || f.size == f.length || f.length > maxClientHelloSize
+            || f.offset > f.length || f.size > f.length - f.offset) {
+            return NotFragmented;
+        }
+        fragments.append(f);
+        pos += recordHeaderSize + recordSize;
+    }
+
+    for (const Fragment &f : std::as_const(fragments)) {
+        if (address != peerAddress || port != peerPort
+            || f.seq != messageSeq || f.length != quint32(body.size())) {
+            /* Another client, or a new ClientHello: start again. */
+            peerAddress = address;
+            peerPort = port;
+            messageSeq = f.seq;
+            body = QByteArray(qsizetype(f.length), '\0');
+            received = QBitArray(qsizetype(f.length));
+            missing = qsizetype(f.length);
+        }
+        const uchar *payload = f.record + recordHeaderSize
+                + handshakeHeaderSize;
+        std::memcpy(body.data() + f.offset, payload, f.size);
+        for (quint32 i = f.offset; i < f.offset + f.size; ++i) {
+            if (!received.testBit(qsizetype(i))) {
+                received.setBit(qsizetype(i));
+                --missing;
+            }
+        }
+        /* The latest record's version and sequence number: wolfSSL
+         * answers with the sequence number of the ClientHello record. */
+        recordHeader = QByteArray(reinterpret_cast<const char *>(f.record),
+                                  recordHeaderSize - 2);
+    }
+    if (missing > 0)
+        return Incomplete;
+
+    const quint32 length = quint32(body.size());
+    QByteArray result = recordHeader;
+    appendUint(&result, handshakeHeaderSize + length, 2);
+    result.append(char(clientHelloMessage));
+    appendUint(&result, length, 3);
+    appendUint(&result, messageSeq, 2);
+    appendUint(&result, 0, 3);
+    appendUint(&result, length, 3);
+    result.append(body);
+    *hello = result;
+    clear();
+    return Complete;
+}
+
+void ClientHelloAssembler::clear()
+{
+    peerAddress.clear();
+    peerPort = 0;
+    messageSeq = 0;
+    recordHeader.clear();
+    body.clear();
+    received.clear();
+    missing = 0;
+}
+
 } /* namespace dtlswolfssl */
 
 QDtlsClientVerifierWolfSSL::QDtlsClientVerifierWolfSSL()
@@ -382,10 +499,16 @@ bool QDtlsClientVerifierWolfSSL::verifyClient(QUdpSocket *socket,
     clearDtlsError();
     verifiedClientHello.clear();
 
+    QByteArray hello = dgram;
+    if (helloAssembler.add(dgram, address, port, &hello)
+        == dtlswolfssl::ClientHelloAssembler::Incomplete) {
+        return false;
+    }
+
     /* The check is stateless: a new WOLFSSL object for every datagram, on
      * the same context. A HelloVerifyRequest goes out through ioSend(). */
     dtls.resetConnection();
-    if (!dtls.init(this, socket, address, port, dgram))
+    if (!dtls.init(this, socket, address, port, hello))
         return false;
     /* The secret may have changed since the last call. */
     if (secret.isEmpty()
@@ -409,7 +532,7 @@ bool QDtlsClientVerifierWolfSSL::verifyClient(QUdpSocket *socket,
     dtls.resetConnection();
 
     if (verified) {
-        verifiedClientHello = dgram;
+        verifiedClientHello = hello;
         return true;
     }
     /* Not verified yet, or not a ClientHello at all. It's UDP: ignore the
@@ -520,7 +643,18 @@ bool QDtlsPrivateWolfSSL::startHandshake(QUdpSocket *socket,
     clearDtlsError();
     connectionEncrypted = false;
 
-    if (!dtls.init(this, socket, remoteAddress, remotePort, dgram))
+    QByteArray hello = dgram;
+    if (mode == QSslSocket::SslServerMode
+        && helloAssembler.add(dgram, remoteAddress, remotePort, &hello)
+                == dtlswolfssl::ClientHelloAssembler::Incomplete) {
+        /* The rest of the ClientHello comes with continueHandshake(). */
+        handshakeState = QDtls::HandshakeInProgress;
+        dtls.certificateErrors.clear();
+        tlsErrors.clear();
+        return true;
+    }
+
+    if (!dtls.init(this, socket, remoteAddress, remotePort, hello))
         return false;
 
     if (mode == QSslSocket::SslServerMode
@@ -558,10 +692,17 @@ bool QDtlsPrivateWolfSSL::continueHandshake(QUdpSocket *socket,
 
     clearDtlsError();
 
+    QByteArray message = dgram;
+    if (mode == QSslSocket::SslServerMode
+        && helloAssembler.add(dgram, remoteAddress, remotePort, &message)
+                == dtlswolfssl::ClientHelloAssembler::Incomplete) {
+        return true;
+    }
+
     if (timeoutHandler)
         timeoutHandler->stop();
 
-    if (!dtls.init(this, socket, remoteAddress, remotePort, dgram))
+    if (!dtls.init(this, socket, remoteAddress, remotePort, message))
         return false;
 
     return doHandshakeStep();
@@ -1000,6 +1141,7 @@ void QDtlsPrivateWolfSSL::resetDtls()
     if (timeoutHandler)
         timeoutHandler->stop();
     dtls.reset();
+    helloAssembler.clear();
     connectionEncrypted = false;
     tlsErrors.clear();
     tlsErrorsToIgnore.clear();
