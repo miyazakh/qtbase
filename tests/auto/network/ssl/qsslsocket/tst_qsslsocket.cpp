@@ -305,6 +305,7 @@ private:
     bool isTestingSecureTransport = false;
     bool isTestingSchannel = false;
     bool isTestingWolfSsl = false;
+    bool isTestServerCertificateRejected = false;
     QSslError::SslError flukeCertificateError = QSslError::CertificateUntrusted;
     bool hasServerAlpn = false;
 #endif // QT_CONFIG(ssl)
@@ -452,6 +453,20 @@ void tst_QSslSocket::initTestCase()
     QVERIFY(QtNetworkSettings::verifyConnection(QtNetworkSettings::httpServerName(), 443));
     QVERIFY(QtNetworkSettings::verifyConnection(QtNetworkSettings::imapServerName(), 993));
     QVERIFY(QtNetworkSettings::verifyConnection(QtNetworkSettings::echoServerName(), 13));
+    if (isTestingWolfSsl) {
+        /* The test server's certificate is signed with MD5, which wolfSSL
+         * verifies only when built with WOLFSSL_ALLOW_MD5_CERT_SIGS. */
+        const QList<QSslCertificate> serverCert =
+                QSslCertificate::fromPath(httpServerCertChainPath());
+        const QSslConfiguration saved =
+                QSslConfiguration::defaultConfiguration();
+        QSslConfiguration withServerCert = saved;
+        withServerCert.addCaCertificates(serverCert);
+        QSslConfiguration::setDefaultConfiguration(withServerCert);
+        isTestServerCertificateRejected =
+                !QSslCertificate::verify(serverCert).isEmpty();
+        QSslConfiguration::setDefaultConfiguration(saved);
+    }
 #else
     if (!QtNetworkSettings::verifyTestNetworkSettings())
         QSKIP("No network test server available");
@@ -1128,6 +1143,10 @@ void tst_QSslSocket::connectToHostEncrypted()
 {
     if (!QSslSocket::supportsSsl())
         return;
+    if (isTestServerCertificateRejected) {
+        QSKIP("wolfSSL is built without MD5 certificate signatures, which "
+              "the test server's certificate uses");
+    }
 
     QSslSocketPtr socket = newSocket();
 
@@ -1165,6 +1184,10 @@ void tst_QSslSocket::connectToHostEncryptedWithVerificationPeerName()
 {
     if (!QSslSocket::supportsSsl())
         return;
+    if (isTestServerCertificateRejected) {
+        QSKIP("wolfSSL is built without MD5 certificate signatures, which "
+              "the test server's certificate uses");
+    }
 
     QSslSocketPtr socket = newSocket();
 
@@ -1847,6 +1870,14 @@ void tst_QSslSocket::setLocalCertificateChain()
     socket->connectToHostEncrypted(QHostAddress(QHostAddress::LocalHost).toString(), server.serverPort());
     loop.exec();
 
+    if (isTestingWolfSsl && server.socket
+            && server.socket->error()
+                    == QAbstractSocket::SslInvalidUserDataError
+            && server.socket->privateKey().length() > 4096) {
+        /* wolfSSL's default RSA_MAX_SIZE is 4096 bits; leaf.key has 8192. */
+        QSKIP("wolfSSL is built without support for RSA keys of this size");
+    }
+
     QList<QSslCertificate> chain = socket->peerCertificateChain();
     if (isTestingSchannel) {
         QEXPECT_FAIL("", "Schannel cannot send intermediate certificates not "
@@ -1947,13 +1978,18 @@ void tst_QSslSocket::setSslConfiguration()
     if (!QSslSocket::supportsSsl())
         return;
 
+    QFETCH(bool, works);
+    if (works && isTestServerCertificateRejected) {
+        QSKIP("wolfSSL is built without MD5 certificate signatures, which "
+              "the test server's certificate uses");
+    }
+
     QSslSocketPtr socket = newSocket();
     QFETCH(QSslConfiguration, configuration);
     socket->setSslConfiguration(configuration);
 
     this->socket = socket.data();
     socket->connectToHostEncrypted(QtNetworkSettings::httpServerName(), 443);
-    QFETCH(bool, works);
     QFETCH_GLOBAL(bool, setProxy);
     if (setProxy && (socket->waitForEncrypted(10000) != works))
         QSKIP("Skipping flaky test - See QTBUG-29941");
